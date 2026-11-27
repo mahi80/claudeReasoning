@@ -1,0 +1,3 @@
+{"id": "note", "task": "Create notes/a.txt containing the single word hello, then read it back and tell me what it says.", "check": "grep -qx hello notes/a.txt"}
+{"id": "fix-typo", "task": "In README.txt replace the word 'teh' with 'the' and report the corrected sentence.", "files": {"README.txt": "This is teh readme.\n"}, "check": "grep -q 'This is the readme' README.txt"}
+{"id": "count-lines", "task": "Count the lines in data.csv and answer with just the number.", "files": {"data.csv": "a\nb\nc\n"}, "check": "grep -q 3"}

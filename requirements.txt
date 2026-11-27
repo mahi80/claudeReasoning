@@ -1,0 +1,9 @@
+# Versions the tests were run with (Python 3.13). Newer releases should work; older majors may not.
+openai>=3.60,<4            # harness: OpenAI-compatible client for vLLM
+mcp>=2.3,<3                # harness/mcp_bridge.py (the v2 client API differs from v1)
+fastapi>=0.165             # app/server.py
+uvicorn>=0.54              # app/server.py
+python-multipart>=0.0.32   # form posts in app/server.py
+httpx>=0.29                # tests/test_app.py
+# Optional: tests/test_ui_browser.py needs playwright and a local Chrome or Chromium.
+# Optional: docs/build needs matplotlib, pillow, numpy and the "docx" npm package.

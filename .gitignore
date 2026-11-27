@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+
+# run-time state of the harness
+workspace/
+checkpoints/
+trace.jsonl
+
+# intermediate files of the document build
+docs/build/out/
