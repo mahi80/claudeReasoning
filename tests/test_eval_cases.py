@@ -108,6 +108,8 @@ fine = {
         "CHANGELOG_dot_md": ac.CHANGELOG_WANT.replace("\n## 1.3.2", "\n\n## 1.3.2")}),
     "handbook: a number given as text": ("handbook", {
         "answers_dot_json": json.dumps({k: str(v) for k, v in ac.HANDBOOK_ANSWERS.items()})}),
+    "handbook: the office named the way its heading is": ("handbook", {
+        "answers_dot_json": json.dumps({**ac.HANDBOOK_ANSWERS, "q4": "Austin office"})}),
 }
 for name, (case_id, changes) in fine.items():
     passed, why = graded(case_id, **changes)

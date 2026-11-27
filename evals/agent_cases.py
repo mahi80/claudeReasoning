@@ -573,7 +573,8 @@ case("handbook",
                        "q3: After how many months are laptops refreshed in the Pune office?\n"
                        "q4: Which office has the highest hotel cap per night?\n"},
      f'''got, want = json.loads(text("answers.json")), {HANDBOOK_ANSWERS!r}
-wrong = [k for k in want if str(got.get(k, "")).strip().lower() != str(want[k]).lower()]
+plain = lambda value: str(value).strip().lower().removesuffix(" office")   # "Austin office" is fine
+wrong = [f"{{k}}={{got.get(k)!r}}" for k in want if plain(got.get(k, "")) != plain(want[k])]
 if wrong:
     sys.exit(f"wrong answers: {{wrong}}")
 ''',
