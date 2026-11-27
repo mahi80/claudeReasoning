@@ -30,7 +30,7 @@ os.environ.update(
     AGENT_TRACE=str(tmp / "trace.jsonl"), AGENT_CHECKPOINTS=str(tmp / "checkpoints"),
     RUNPOD_API=f"http://127.0.0.1:{rp_port}/v1", RUNPOD_POD_ID="pod123",
     RUNPOD_API_KEY="rp-key", LLM_HEALTH_URL=f"http://127.0.0.1:{rp_port}/health",
-    POD_POLL_SECONDS="0.1", POD_IDLE_SECONDS="1.5", POD_WATCH_SECONDS="0.3",
+    POD_POLL_SECONDS="0.1", POD_IDLE_SECONDS="inf", POD_WATCH_SECONDS="0.3",
     POD_START_TIMEOUT="20", APPROVAL_TIMEOUT="20")
 
 import httpx  # noqa: E402
@@ -128,7 +128,7 @@ clicks: list[str] = []
 def click(event: str, data: str) -> None:
     if event == "approval" and "hx-post" in data:
         choice = "deny" if not clicks else "allow"
-        url = re.search(r'hx-post="(/runs/\w+/approval/' + choice + ')"', data).group(1)
+        url = re.search(r'hx-post="(/runs/\w+/approval/\w+/' + choice + ')"', data).group(1)
         clicks.append(httpx.post(BASE + url, timeout=10).text)
 
 
@@ -142,6 +142,121 @@ check("approval buttons shown with the command",
 check("deny then allow respected", clicks == ["Denied", "Approved"] and len(parts) == 3
       and parts[0].startswith("DENIED") and parts[1].startswith("exit=")
       and parts[2].startswith("exit=0"), f"{clicks} {answer}")
+
+def pending_prompt(run: server.Run, number: int) -> str:
+    with run.changed:
+        ready = run.changed.wait_for(
+            lambda: sum(event == "approval" and "hx-post" in fragment
+                        for event, fragment in run.events) >= number, timeout=5)
+        assert ready, "approval prompt did not arrive"
+        fragment = [fragment for event, fragment in run.events
+                    if event == "approval" and "hx-post" in fragment][-1]
+    return re.search(r'hx-post="(/runs/\w+/approval/\w+)/allow"', fragment).group(1)
+
+
+concurrent = server.Run()
+server.RUNS[concurrent.id] = concurrent
+choices = {}
+
+
+def ask_concurrently(label: str) -> None:
+    choices[label] = concurrent.ask("run_shell", {"command": f"{label}-command"})
+
+
+first = threading.Thread(target=ask_concurrently, args=("first",))
+second = threading.Thread(target=ask_concurrently, args=("second",))
+first.start()
+first_prompt = pending_prompt(concurrent, 1)
+second.start()
+check("approval targets only its own prompt",
+      "closest .approval-request" in concurrent.events[-1][1])
+check("first concurrent command can be approved",
+      httpx.post(BASE + first_prompt + "/allow").text == "Approved")
+first.join(5)
+second_prompt = pending_prompt(concurrent, 2)
+check("one click releases only one concurrent command",
+      choices == {"first": True} and first_prompt != second_prompt and second.is_alive())
+check("stale approval cannot authorize the next command",
+      httpx.post(BASE + first_prompt + "/allow").status_code == 409
+      and choices == {"first": True})
+check("unknown approval ID and invalid choice are rejected",
+      httpx.post(f"{BASE}/runs/{concurrent.id}/approval/nope/allow").status_code == 409
+      and httpx.post(BASE + second_prompt + "/invalid").status_code == 422)
+check("second concurrent command needs its own decision",
+      httpx.post(BASE + second_prompt + "/deny").text == "Denied")
+second.join(5)
+check("concurrent decisions stay isolated",
+      choices == {"first": True, "second": False} and not second.is_alive())
+check("answered approval cannot be submitted twice",
+      httpx.post(BASE + second_prompt + "/allow").status_code == 409)
+concurrent.emit("done", "ok", last=True)
+
+expired = server.Run()
+server.RUNS[expired.id] = expired
+previous_timeout = server.APPROVAL_TIMEOUT
+server.APPROVAL_TIMEOUT = 0.05
+try:
+    refused = not expired.ask("run_shell", {"command": "expired-command"})
+finally:
+    server.APPROVAL_TIMEOUT = previous_timeout
+expired_prompt = pending_prompt(expired, 1)
+check("timed-out approval is denied and cannot be revived",
+      refused and httpx.post(BASE + expired_prompt + "/allow").status_code == 409
+      and expired.pending_approval is None)
+expired.emit("done", "ok", last=True)
+
+budgeted = server.Run()
+server.RUNS[budgeted.id] = budgeted
+approval_waits = []
+wait_for_answer = budgeted.answered.wait
+
+def early_wait(timeout):
+    approval_waits.append(timeout)
+    return False if len(approval_waits) == 1 else wait_for_answer(timeout)
+
+budgeted.answered.wait = early_wait
+budget = server.h.RunBudget(server.h.EFFORTS["medium"])
+budget.deadline = time.monotonic() + 0.05
+token = server.h.BUDGET.set(budget)
+try:
+    try:
+        budgeted.ask("run_shell", {"command": "budgeted-command"})
+        stopped = False
+    except server.h.BudgetExceeded:
+        stopped = True
+finally:
+    server.h.BUDGET.reset(token)
+check("approval waits respect the task deadline and clear pending permission",
+      stopped and len(approval_waits) >= 2 and budgeted.pending_approval is None
+      and not budgeted.approval_lock.locked())
+budgeted.emit("done", "ok", last=True)
+queued = server.Run()
+queued.approval_lock.acquire()
+budget = server.h.RunBudget(server.h.EFFORTS["medium"])
+budget.deadline = time.monotonic() + 0.05
+token = server.h.BUDGET.set(budget)
+try:
+    try:
+        queued.ask("run_shell", {"command": "queued-command"})
+        stopped = False
+    except server.h.BudgetExceeded:
+        stopped = True
+finally:
+    server.h.BUDGET.reset(token)
+    queued.approval_lock.release()
+check("queued approvals cannot wait beyond the shared task deadline",
+      stopped and queued.pending_approval is None and not queued.events)
+previous_tokens = server.h.RUN_MAX_TOKENS
+server.h.RUN_MAX_TOKENS = 1
+try:
+    run_id, _ = post_chat("[scenario:basic] UI token exhaustion")
+    budget_events = read_events(run_id)
+finally:
+    server.h.RUN_MAX_TOKENS = previous_tokens
+check("execution budget stops are streamed as stopped results",
+      texts(budget_events, "answer")[0].startswith("Stopped at the token budget")
+      and "Execution stopped: token budget" in texts(budget_events, "status")
+      and budget_events[-1] == ("done", "ok"))
 
 # 5. untrusted text is escaped on the way to the browser
 run_id, fragment = post_chat("<script>alert(1)</script> [scenario:unknown] ui xss")
@@ -177,7 +292,7 @@ check("review progress shown in the chat",
 
 # 6. unknown run and replay of a finished run
 check("unknown run is 404", httpx.get(f"{BASE}/runs/nope/events").status_code == 404
-      and httpx.post(f"{BASE}/runs/nope/approval/allow").status_code == 404)
+      and httpx.post(f"{BASE}/runs/nope/approval/nope/allow").status_code == 404)
 replay = read_events(ids[0])
 check("finished run replays for a reconnecting browser",
       texts(replay, "answer") == ["DONE: hello"] and replay[-1] == ("done", "ok"))
@@ -187,6 +302,7 @@ lines = [json.loads(x) for x in server.h.TRACE_FILE.read_text().splitlines()]
 check("trace records carry run ids", {ids[0], ids[1]} <= {x["run"] for x in lines})
 
 # 8. idle watchdog stops the pod, and the next request starts it again
+pod_manager.IDLE_SECONDS = 1.5
 deadline = time.time() + 10
 while STATE["stops"] == 0 and time.time() < deadline:
     time.sleep(0.2)

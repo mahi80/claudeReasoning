@@ -11,7 +11,9 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -29,7 +31,23 @@ EFFORT_LABELS = {"low": "Low", "medium": "Medium", "high": "High", "xhigh": "Ext
                  "max": "Max"}
 Level = Literal["low", "medium", "high", "xhigh", "max"]
 
-app = FastAPI(title="Agent chat")
+TOOLS = list(h.ORCHESTRATOR_TOOLS)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if h.MCP_CONFIG:
+        import mcp_bridge
+        TOOLS.extend(mcp_bridge.load_config(h.MCP_CONFIG))
+    try:
+        yield
+    finally:
+        if h.MCP_CONFIG:
+            mcp_bridge.close()
+            TOOLS[:] = h.ORCHESTRATOR_TOOLS
+
+
+app = FastAPI(title="Agent chat", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 RUNS: dict[str, "Run"] = {}
 
@@ -44,6 +62,9 @@ class Run:
         self.finished = False
         self.decision = False
         self.answered = threading.Event()
+        self.approval_lock = threading.Lock()
+        self.pending_approval: str | None = None
+        self.approval_deadline = 0.0
 
     def emit(self, event: str, fragment: str, last: bool = False) -> None:
         with self.changed:
@@ -52,19 +73,38 @@ class Run:
             self.changed.notify_all()
 
     def ask(self, name: str, args: dict) -> bool:
-        """Show Approve / Deny in the chat and wait for the click."""
-        self.answered.clear()
-        self.decision = False
-        buttons = "".join(
-            f'<button hx-post="/runs/{self.id}/approval/{choice}" '
-            f'hx-target="closest .approval" hx-swap="innerHTML">{label}</button>'
-            for choice, label in (("allow", "Approve"), ("deny", "Deny")))
-        detail = html.escape(str(args.get("command") or json.dumps(args)))
-        tool = html.escape(name)
-        self.emit("approval", f"<p>The agent wants to use <code>{tool}</code>:"
-                              f"<br><code>{detail}</code></p>{buttons}")
-        self.answered.wait(APPROVAL_TIMEOUT)          # no click in time means no
-        return self.decision
+        if not self.approval_lock.acquire(timeout=h.time_left(APPROVAL_TIMEOUT)):
+            h.time_left(APPROVAL_TIMEOUT)
+            return False
+        try:
+            approval_id = uuid.uuid4().hex
+            wait_seconds = h.time_left(APPROVAL_TIMEOUT)
+            with self.changed:
+                self.answered.clear()
+                self.decision = False
+                self.pending_approval = approval_id
+                self.approval_deadline = time.monotonic() + wait_seconds
+            buttons = "".join(
+                f'<button hx-post="/runs/{self.id}/approval/{approval_id}/{choice}" '
+                f'hx-target="closest .approval-request" hx-swap="innerHTML">{label}</button>'
+                for choice, label in (("allow", "Approve"), ("deny", "Deny")))
+            detail = html.escape(str(args.get("command") or json.dumps(args)))
+            tool = html.escape(name)
+            self.emit("approval", f'<div class="approval-request" id="approval-{approval_id}">'
+                                  f"<p>The agent wants to use <code>{tool}</code>:"
+                                  f"<br><code>{detail}</code></p>{buttons}</div>")
+            while True:
+                answered = self.answered.wait(h.time_left(
+                    max(0, self.approval_deadline - time.monotonic())))
+                h.time_left(APPROVAL_TIMEOUT)
+                if answered or time.monotonic() >= self.approval_deadline:
+                    with self.changed:
+                        return answered and self.decision
+        finally:
+            with self.changed:
+                self.pending_approval = None
+            self.emit("approval", "<span></span>")
+            self.approval_lock.release()
 
 
 def current_run() -> Run | None:
@@ -87,6 +127,10 @@ def on_trace(record: dict) -> None:
         run.emit("plan", html.escape(record["plan"]).replace("\n", "<br>"))
     elif record["event"] == "compact":
         run.emit("status", "Summarising earlier steps to free context")
+    elif record["event"] == "worker_start":
+        run.emit("status", f"Delegating to worker: {html.escape(', '.join(record['tools']))}")
+    elif record["event"] == "budget_limit":
+        run.emit("status", f"Execution stopped: {html.escape(record['reason'])}")
 
 
 h.LISTENERS.append(on_trace)
@@ -99,7 +143,7 @@ def work(run: Run, message: str, effort: str) -> None:
     try:
         pod_manager.ensure_ready(lambda text: run.emit("status", html.escape(text)))
         run.emit("status", f"Working at {EFFORT_LABELS[effort].lower()} effort")
-        answer = h.run_agent(message, h.orchestrator_system(), h.ORCHESTRATOR_TOOLS,
+        answer = h.run_agent(message, h.orchestrator_system(), TOOLS,
                              effort=effort)
         run.emit("answer", html.escape(answer).replace("\n", "<br>"))   # never raw HTML
     except Exception as err:
@@ -209,11 +253,16 @@ def events(run_id: str) -> StreamingResponse:
     return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
 
-@app.post("/runs/{run_id}/approval/{choice}", response_class=HTMLResponse)
-def approval(run_id: str, choice: str) -> str:
+@app.post("/runs/{run_id}/approval/{approval_id}/{choice}", response_class=HTMLResponse)
+def approval(run_id: str, approval_id: str, choice: Literal["allow", "deny"]) -> str:
     run = RUNS.get(run_id)
     if run is None:
         raise HTTPException(404, "unknown run")
-    run.decision = choice == "allow"
-    run.answered.set()
-    return "Approved" if run.decision else "Denied"
+    with run.changed:
+        if (run.pending_approval != approval_id
+                or time.monotonic() >= run.approval_deadline):
+            raise HTTPException(409, "approval is no longer pending")
+        run.decision = choice == "allow"
+        run.pending_approval = None
+        run.answered.set()
+        return "Approved" if run.decision else "Denied"

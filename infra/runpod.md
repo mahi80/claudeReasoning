@@ -70,8 +70,10 @@ lives in one data centre and has to be attached when the pod is created.
 
 ## Serve commands
 
-Taken from the vLLM recipes, with host, port and a stable served model name added.
-None of them was run on a live GPU for this repository.
+The larger configurations below come from the vLLM recipes, with host, port and a
+stable served model name added; they remain untested on live GPUs for this repository.
+A separate one-B300 DeepSeek V4-Flash experiment is described below. Do not treat it as
+validation of the eight-GPU recipe, V4.1, Gemma or Mistral presets.
 
 ### Gemma 4 26B-A4B on one 80 GB GPU (A1, A2)
 
@@ -164,6 +166,89 @@ repository. Needs vLLM 0.31.0 or later.
 
 Take the exact B200 and H100 commands from the recipe page's command builder.
 
+## Disposable-pod test script and observed results
+
+`infra/pod_test.sh` runs inside a Linux GPU pod using the PyTorch template. Choose
+`gemma4`, `deepseek-v4` or `deepseek-v41`; omitted steps run `setup serve smoke evals`.
+It installs vLLM and downloads weights, so pin versions/revisions separately for a
+repeatable deployment. It uses `--trust-remote-code` for V4: review and pin that code.
+
+```bash
+bash infra/pod_test.sh gemma4 setup serve smoke
+OUT=/root/eval-round-1 EVALS=evals/tasks.agent.jsonl EFFORTS="low medium" SHARDS=2 \
+  bash infra/pod_test.sh gemma4 evals
+```
+
+`EVALS` selects the task file; `tasks.agent.jsonl` contains 18 cases. `SHARDS=2` splits
+those cases over two processes per effort level (runner arguments `--shard 0/2` and
+`--shard 1/2`). All levels/shards run concurrently, so choose concurrency the GPU can
+support. Use a new `OUT` directory per experiment to avoid mixing previous results.
+Outputs include `system.log`, `download.log`, `vllm.log`, `smoke.log`, `task.log`, and
+`evals_<level>_<shard>.json` plus `.err`, `.trace.jsonl`, workspaces and checkpoints.
+Inspect failed answers and traces, not just artifact files or shell exit codes.
+
+The V4 script defaults to 131,072 context. `SERVE_EXTRA` can append flags such as
+`--max-model-len 32768 --max-num-seqs 2`; if you change the server context, set
+`LLM_CONTEXT_WINDOW=32768` on the harness too. The script's V4 preset exports 131,072
+internally, so run the harness directly with matching settings rather than assume an
+environment override on `pod_test.sh smoke/evals` is retained. Do not add
+`--enforce-eager` to the revalidated B300 configuration below.
+
+**Initial experiment on 27 November 2026, commit `f00e4ea`:** one B300 (288 GB),
+vLLM 0.34.0, `deepseek-ai/DeepSeek-V4-Flash-0731` revision
+`7872f01b1d1fe23eabc4c98b48bffcef5a386062`, localhost-only serving, 32,768 context,
+`--max-num-seqs 2`, eager execution and `VLLM_DEEP_GEMM_WARMUP=skip`. Protocol probes
+passed 8/8 and shared-budget stop checks passed 4/4. Both full workflows passed 10/13
+checks but stopped at 600 seconds without independent PASS. Four selected cases at
+low/medium passed 3/8 under 90-second limits, not a full 18-case benchmark. The pod
+quoted $10.49/hour; conservative rental estimate was $9.57 and shutdown was verified
+at $0/hour. These initial results remain separate from the revalidation below.
+
+### Revalidated B300 configuration
+
+The current local reviewer-evidence, reply-reservation and approval fixes were tested
+on 27 November 2026 as an uncommitted source snapshot based on `f00e4ea`. Forced eager
+execution still timed out. On the same pod, replacing it with decode CUDA graphs and
+kernel warmup completed the original workflow in 63.9 seconds: all 17 checks passed,
+including an independent reviewer workspace read and recorded PASS. The 600-second
+limit, xhigh/high-native thinking, worker scopes, approvals and review policy were
+unchanged. No runtime source edits were needed for this serving fix.
+
+Use vLLM **0.34.0** and the pinned model revision with this tested command:
+
+```bash
+export HF_HOME=/root/hf VLLM_DEEP_GEMM_WARMUP=skip VLLM_ENGINE_READY_TIMEOUT_S=600
+vllm serve deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062 \
+  --host 127.0.0.1 --port 8000 --served-model-name agent-model \
+  --trust-remote-code --kv-cache-dtype fp8 --block-size 256 \
+  --tensor-parallel-size 1 --gpu-memory-utilization 0.92 \
+  --attention_config.indexer_kv_dtype mxfp4 --no-enable-flashinfer-autotune \
+  --tokenizer-mode deepseek_v4 --enable-auto-tool-choice --tool-call-parser deepseek_v4 \
+  --reasoning-parser deepseek_v4 --reasoning-config \
+  '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}' \
+  --max-model-len 32768 --max-num-seqs 2 \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2]}'
+```
+
+Wait for `/health` before starting the harness. Set `LLM_CONTEXT_WINDOW=32768`,
+`LLM_THINKING_SCOPE=task` and `LLM_KEEP_REASONING=1`; use the DeepSeek V4 thinking
+settings below with high native thinking for xhigh. This is a one-B300, low-concurrency
+configuration, not validation of the larger presets, other contexts or max thinking.
+
+The graph-enabled run passed protocol checks 8/8, shared-budget stop checks 4/4 and
+missing/denied reviewer-evidence rejection checks 3/3. Separately labeled token/cost
+admission checks passed 7/7; the initial exact-OK response-format failure is preserved.
+All four selected cases at low/medium passed 8/8 under both the original 90-second
+limits and separately labeled 180-second limits. The full 18-case benchmark was not run.
+
+Both baseline and final evidence archives were downloaded and every recorded output
+and source hash verified before stopping the new pod. Compute and container storage
+were confirmed not running at $0/hour; the conservative new-spend estimate was $11.05
+within the authorized $20 cap, not a final invoice. The script does not stop a pod or
+enforce a rental cap. Export results, stop the pod and verify billing has stopped.
+Agent time/token budgets do not include setup or rental.
+
 ## Smoke tests
 
 ```bash
@@ -181,11 +266,14 @@ template is wrong for that model.
 
 The harness turns the model's own thinking on and off per call, according to the effort
 level. Each model takes different request fields, so they are configuration:
-`LLM_THINKING` is a JSON map with `off`, `on` and optionally `max`. Set
-`LLM_CONTEXT_WINDOW` to the `--max-model-len` you serve.
+`LLM_THINKING` is a JSON map with `off`, `on` and optionally `max` and `brief`. Set
+`LLM_CONTEXT_WINDOW` to the `--max-model-len` you serve. `LLM_THINKING_SCOPE=step` is
+the default; `task` keeps medium on throughout using `brief` if defined, otherwise
+`on`. Low remains off and high remains on.
 
-These fields come from the vLLM documentation, the recipes and the vLLM source at commit
-`c58be70` (27 November 2026). None was run against a live model for this repository.
+These fields come from the vLLM documentation, recipes and source at commit `c58be70`
+(27 November 2026). The separate V4-Flash 0731 experiment exercised live thinking/tool
+probes; the other models and max-thinking configurations below were not validated live.
 With `LLM_THINKING` set, `harness/smoke_test.py` sends one request per fragment and fails
 if `on` returns no reasoning or `off` returns some.
 
@@ -202,9 +290,10 @@ Thinking is off unless switched on. Google says thoughts must stay in place betw
 function calls, and vLLM's Gemma 4 template renders returned reasoning for the messages
 after the last user message, hence `LLM_KEEP_REASONING=1`. The switch is a token at the
 top of the system turn, so each flip defeats the server's prefix cache for that call.
-Google describes thinking as a conversation-level setting, so the per-step pattern at
-medium effort is off the documented path: if your evals show trouble at medium, change
-its `thinking` value in `EFFORTS` to `all` or `off`.
+Google describes thinking as a conversation-level setting, so use
+`LLM_THINKING_SCOPE=task` for medium effort (the Gemma pod-test preset already does).
+Medium then uses `on` throughout, or a configured `brief` fragment; no change to
+`EFFORTS` is needed. Validate the switch with your exact model/template.
 
 ### Mistral Small 4
 
