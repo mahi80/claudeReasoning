@@ -42,19 +42,26 @@ Month totals are the GPU cost plus a network volume for the weights at $0.07/GB/
 | D1 | DeepSeek V4-Flash, FP8 (0731) | 8x H200 | 1128 GB | $42.32 | $7,476 | $30,922 | vLLM recipe default (TP8 with expert parallel) |
 | D2 | DeepSeek V4-Flash, NVFP4 | 4x B200 | 720 GB | $31.96 | $5,653 | $23,359 | NVIDIA Dynamo recipe |
 | D3 | DeepSeek V4-Flash, FP8 (0731) | 8x H100 PCIe | 640 GB | $23.12 | $4,097 | $16,906 | Reported in the vLLM recipe; sensitive to the vLLM version |
+| E1 | DeepSeek V4.1-Flash, FP8 (1017) | 4x H200 | 564 GB | $21.16 | $3,773 | $15,496 | vLLM recipe, verified (TP4, Engram tables in host memory) |
+| E2 | DeepSeek V4.1-Flash, FP8 (1017) | 2x B200 | 360 GB | $15.98 | $2,861 | $11,714 | vLLM recipe, verified for low concurrency (TP2, at most 8 sequences) |
+| E3 | DeepSeek V4.1-Flash, FP8 (1017) | 8x H100 PCIe | 640 GB | $23.12 | $4,118 | $16,927 | vLLM recipe: TP8 on 80 GB cards, with extra memory settings |
 
 Not included: a host for the harness (a 4 vCPU, 8 GB CPU pod is about $86 a month always
 on) and container disk. Multi-GPU on-demand capacity for H200 and B200 was limited in
-November 2026, so keep a fallback configuration for the C and D rows.
+November 2026, so keep a fallback configuration for the C, D and E rows.
+
+The D rows are the configurations the V4-Flash recipe publishes, all on 8-GPU nodes. Its
+0731 checkpoint needs about 200 GB of GPU memory with headroom, and the recipe mentions
+reports of 4x H100 working, so a smaller pod may run it. Treat that as an experiment.
 
 ## Pod template
 
 | Setting | Value |
 |---|---|
-| Container image | `vllm/vllm-openai` with a pinned tag, not `latest`. Gemma 4 on H100 or H200: `gemma4-0505-cu129`. DeepSeek recipe image: `v0.28.0`. Mistral Small 4: a release at or above 0.20.0. |
+| Container image | `vllm/vllm-openai` with a pinned tag, not `latest`. Gemma 4 on H100 or H200: `gemma4-0505-cu129`. DeepSeek V4-Flash recipe image: `v0.28.0`. DeepSeek V4.1-Flash: a release at or above 0.31.0. Mistral Small 4: a release at or above 0.20.0. |
 | Start command | `vllm serve <model> <flags>` as below. If the pod log shows an argument error on first boot, the image's entrypoint already runs the server: remove the leading `vllm serve`. |
 | Environment | `HF_TOKEN` for gated models, `HF_HOME=/workspace/hf` so the cache sits on the volume, `VLLM_API_KEY` for the endpoint key, `VLLM_WORKER_MULTIPROC_METHOD=spawn` on multi-GPU pods. |
-| Storage | Network volume mounted at `/workspace` (150 GB for Gemma 4, 250 GB for Mistral Small 4, 400 GB for DeepSeek V4-Flash). Container disk 30 to 50 GB. |
+| Storage | Network volume mounted at `/workspace` (150 GB for Gemma 4, 250 GB for Mistral Small 4, 400 GB for DeepSeek V4-Flash, 700 GB for DeepSeek V4.1-Flash). Container disk 30 to 50 GB. |
 | Ports | Expose HTTP port 8000 only if you use the proxy. The server must bind to `0.0.0.0`. |
 | Cloud | Secure Cloud. Switch on global networking if other GPU pods need private access. |
 
@@ -109,6 +116,53 @@ vllm serve deepseek-ai/DeepSeek-V4-Flash-0731 \
 
 Needs vLLM 0.25.0 or later. `--trust-remote-code` runs code from the model repository,
 so pin the revision and review it first.
+
+### DeepSeek V4.1-Flash on four H200s (E1)
+
+```bash
+export VLLM_ENGINE_READY_TIMEOUT_S=3600
+export VLLM_USE_RUST_FRONTEND=1
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+  --host 0.0.0.0 --port 8000 --served-model-name agent-model \
+  --tokenizer-mode deepseek_v41 --tensor-parallel-size 4 \
+  --engram-config '{"cpu_offload":true}' \
+  --tool-call-parser deepseek_v41 --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v41 \
+  --language-model-only
+```
+
+Assembled from the recipe's H200 settings (TP4, Engram tables in host memory, tool and
+reasoning parsers) with host, port and served name added. It was not run for this
+repository. Needs vLLM 0.31.0 or later.
+
+- **What the model is.** V4.1-Flash is the successor to V4-Flash: 552B backbone
+  parameters plus 196B of Engram memory tables, 8B active per prompt token and 16B per
+  output token, text and image input, 1M context, MIT licence. Released 9 September
+  2026; the `-1017` repository holds the 17 October weight update the recipe recommends.
+- **Text only.** `--language-model-only` skips the vision encoder and leaves that
+  memory for the KV cache. Drop it to accept images; the recipe then adds
+  `--mm-encoder-tp-mode data`.
+- **Host memory.** `cpu_offload` moves the Engram tables (183 GiB) into pinned system
+  memory. On H200 the recipe reports 81.2 GiB of weights and 38.5 GiB of KV cache per
+  GPU afterwards. Runpod lists 276 GB of system RAM per H200 and 283 GB per B200, so a
+  4x H200 pod should have about 1,100 GB.
+- **Not proven on Runpod.** The recipe's Docker example runs the container privileged
+  with host IPC, and Runpod's documented pod settings include neither. Whether the
+  host-memory offload starts cleanly in a pod is the first thing to test.
+- **Checkpoint and cold start.** The checkpoint is about 511 GB, so use a 700 GB
+  volume and expect a long first download. The recipe allows 3,600 seconds for the
+  server to become ready. Set `POD_START_TIMEOUT=3900` for the pod manager and choose
+  the idle timeout with that reload time in mind.
+- **Two B200s (E2).** The recipe uses `--tensor-parallel-size 2` with its Blackwell
+  attention settings, THP-backed Engram offload, `--max-num-seqs 8` and
+  `--max-num-batched-tokens 4096`. It is tuned for one agent session at a time; the
+  recipe points to TP4 for more interactivity.
+- **Eight H100s (E3).** On 80 GB cards the recipe needs all eight: TP8, Engram
+  offload, `--max-num-batched-tokens 4096`,
+  `--gpu-memory-utilization 0.92`, `VLLM_USE_V2_MODEL_RUNNER=1` and
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
+Take the exact B200 and H100 commands from the recipe page's command builder.
 
 ## Smoke tests
 
@@ -181,8 +235,28 @@ conversation, provided the client sends it back. The recipe asks for `--max-mode
 of at least 393216 in max mode; set `LLM_CONTEXT_WINDOW` to whatever you serve. The 0731
 release also has a `low` level, which you can use for `on` to make high effort cheaper.
 
-DeepSeek V4.1-Flash (September 2026) is newer and takes a numeric reasoning budget. It
-is not sized in this repository; read its vLLM recipe before choosing a DeepSeek tier.
+### DeepSeek V4.1-Flash
+
+```bash
+export LLM_THINKING='{"off": {"chat_template_kwargs": {"thinking": false}},
+  "on":  {"chat_template_kwargs": {"thinking": true, "reasoning_effort": 50}},
+  "max": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": 100}}}'
+export LLM_KEEP_REASONING=1
+export LLM_TEMPERATURE=1.0
+export LLM_EXTRA_BODY='{"top_p": 0.95}'
+export LLM_CONTEXT_WINDOW=1048576
+```
+
+Thinking is on unless switched off, so the `off` fragment matters here too. Effort is a
+number from 1 to 100. The names `low`, `high`, `xhigh` and `max` also work, but the
+recipe and vLLM's source map them to different numbers, so send the number. The encoder
+keeps reasoning across a tool-calling conversation, as for V4-Flash.
+
+Watch the reply budget. The recipe warns that a small `max_tokens` can return an empty
+reply when thinking uses it up, and DeepSeek ran its effort-100 benchmarks with at
+least 256K output tokens. The harness retries an empty reply once without thinking and
+records a `blank` event in the trace. If you see those, raise `max_tokens` for the
+level in `EFFORTS`, or lower the effort number in the `on` fragment.
 
 ### Room for thinking
 

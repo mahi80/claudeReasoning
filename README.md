@@ -1,7 +1,7 @@
 # claudeReasoning
 
 A small, readable agent harness in the style Claude itself runs in, built to work with
-open-weight models (Gemma 4, Mistral Small 4, DeepSeek V4-Flash) served by vLLM on
+open-weight models (Gemma 4, Mistral Small 4, DeepSeek V4-Flash and V4.1-Flash) served by vLLM on
 Runpod on-demand Pods. It comes with a chat UI, on-demand GPU start and stop, and a
 design document that explains every part.
 
@@ -69,7 +69,7 @@ What sits behind the columns, all in `harness/mini_harness.py`:
 - **The model's own thinking** is switched per call through `LLM_THINKING`, a small JSON
   map of request fields for `off`, `on` and `max`. The fields differ per model;
   [`infra/runpod.md`](infra/runpod.md) has them for Gemma 4, Mistral Small 4 and
-  DeepSeek V4-Flash.
+  DeepSeek V4-Flash and V4.1-Flash.
 - **One line of guidance per level** is added to every system prompt (`GUIDANCE`).
 - **A `think` tool** gives the model a place to reason between tool calls.
 - **Self-check** (high and above): before an answer is accepted, the model checks it
@@ -195,8 +195,14 @@ Secure Cloud rates read on 27 November 2026. Month totals include a weights volu
 | Gemma 4 31B | 1x H200 | $5.29 | $942 | $3,872 |
 | Mistral Small 4 (FP8) | 2x H200 | $10.58 | $1,880 | $7,741 |
 | DeepSeek V4-Flash (FP8) | 8x H200 | $42.32 | $7,476 | $30,922 |
+| DeepSeek V4.1-Flash (FP8) | 4x H200 | $21.16 | $3,773 | $15,496 |
+| DeepSeek V4.1-Flash (FP8) | 2x B200, one session at a time | $15.98 | $2,861 | $11,714 |
 
-All ten configurations, the price table and the caveats are in
+V4.1-Flash is the newer DeepSeek release. It rents for about half of V4-Flash's
+eight-GPU recipe default, but it is the hardest of these to operate: a 511 GB checkpoint,
+part of the model held in system memory, and a first load the recipe allows an hour for.
+
+All thirteen configurations, the price table and the caveats are in
 [`infra/runpod.md`](infra/runpod.md). Runpod changes prices often: edit `RATE` in
 [`infra/costs.py`](infra/costs.py) and run it to recalculate.
 

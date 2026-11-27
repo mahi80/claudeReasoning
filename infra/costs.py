@@ -13,6 +13,8 @@ RATE = {  # USD per GPU-hour, on-demand
 VRAM = {"B200": 180, "H200": 141, "H100 SXM": 80, "H100 NVL": 94, "H100 PCIe": 80, "A100 PCIe": 80,
         "A100 SXM": 80, "RTX PRO 6000": 96, "L40S": 48, "RTX A6000": 48, "A40": 48}
 COMMUNITY_FROM = {"H200": 3.59, "H100 PCIe": 1.99, "H100 SXM": 2.69, "A100 PCIe": 1.19, "A100 SXM": 1.39}
+RAM = {"B200": 283, "H200": 276, "H100 SXM": 125, "H100 NVL": 94, "H100 PCIe": 188,   # system RAM, GB per GPU
+       "A100 PCIe": 117, "A100 SXM": 125, "RTX PRO 6000": 188}
 
 HOURS_WORK = 8 * 22          # 176 h: working hours, 22 days
 HOURS_ALWAYS = 24 * 365 / 12 # 730 h: always on
@@ -29,6 +31,10 @@ configs = [
     ("D1", "DeepSeek V4-Flash", "FP8 (0731)", "H200", 8, 400),
     ("D2", "DeepSeek V4-Flash", "NVFP4", "B200", 4, 400),
     ("D3", "DeepSeek V4-Flash", "FP8 (0731)", "H100 PCIe", 8, 400),
+    # V4.1-Flash: a 511 GB checkpoint; its Engram tables (183 GiB) sit in host memory
+    ("E1", "DeepSeek V4.1-Flash", "FP8 (1017)", "H200", 4, 700),
+    ("E2", "DeepSeek V4.1-Flash", "FP8 (1017)", "B200", 2, 700),
+    ("E3", "DeepSeek V4.1-Flash", "FP8 (1017)", "H100 PCIe", 8, 700),
 ]
 NV_RATE = 0.07  # USD per GB-month, network volume under 1 TB
 out = []
@@ -37,7 +43,8 @@ for cid, model, prec, gpu, n, vol in configs:
     storage = round(vol * NV_RATE, 2)
     out.append({
         "id": cid, "model": model, "precision": prec, "gpu": gpu, "count": n,
-        "vram_total": VRAM[gpu] * n, "hourly": hourly,
+        "vram_total": VRAM[gpu] * n, "ram_total": RAM[gpu] * n if gpu in RAM else None,
+        "hourly": hourly,
         "work_month": round(hourly * HOURS_WORK, 2), "always_month": round(hourly * HOURS_ALWAYS, 2),
         "volume_gb": vol, "storage_month": storage,
         "work_total": round(hourly * HOURS_WORK + storage, 2),
