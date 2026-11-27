@@ -207,6 +207,14 @@ expired.emit("done", "ok", last=True)
 
 budgeted = server.Run()
 server.RUNS[budgeted.id] = budgeted
+approval_waits = []
+wait_for_answer = budgeted.answered.wait
+
+def early_wait(timeout):
+    approval_waits.append(timeout)
+    return False if len(approval_waits) == 1 else wait_for_answer(timeout)
+
+budgeted.answered.wait = early_wait
 budget = server.h.RunBudget(server.h.EFFORTS["medium"])
 budget.deadline = time.monotonic() + 0.05
 token = server.h.BUDGET.set(budget)
@@ -219,7 +227,7 @@ try:
 finally:
     server.h.BUDGET.reset(token)
 check("approval waits respect the task deadline and clear pending permission",
-      stopped and budgeted.pending_approval is None
+      stopped and len(approval_waits) >= 2 and budgeted.pending_approval is None
       and not budgeted.approval_lock.locked())
 budgeted.emit("done", "ok", last=True)
 queued = server.Run()

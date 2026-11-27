@@ -327,7 +327,10 @@ check("max uses its own thinking fragment, merged with LLM_EXTRA_BODY",
 
 # the think tool is a no-op the model can call between other tools
 out, reqs, evs = run_at("medium", "[scenario:think] reason between calls")
-check("think tool", out == "think said: noted" and "think" in offered(reqs[0]), out)
+check("think is a no-op and does not leak reasoning into review evidence",
+      out == "think said: noted" and "think" in offered(reqs[0])
+      and not json.loads(h.checkpoint_file("[scenario:think] reason between calls").read_text())[
+          "observations"], out)
 
 # xhigh: an independent reviewer with a fresh context can send the work back once
 out, reqs, evs = run_at("xhigh", "[scenario:review] reviewed once")
@@ -340,6 +343,8 @@ check("each reviewer has a fresh context and read-only tools",
       and all(offered(r) == {"read_file", "list_dir", "think"} for r in reviewer)
       and "answer one" in reviewer[0]["messages"][1]["content"]
       and "answer two" in reviewer[2]["messages"][1]["content"])
+check("review verdicts retain the reason for rejection in the trace",
+      [e["verdict"] for e in kinds(evs, "review")] == ["FAIL\nr.txt holds the wrong text", "PASS"])
 out, reqs, evs = run_at("max", "[scenario:review] reviewed twice")
 check("max: second review passes after the fix",
       out == "answer two" and [e["passed"] for e in kinds(evs, "review")] == [False, True], out)
@@ -621,6 +626,34 @@ with patch.multiple(h, RUN_MAX_COST=0.0001, INPUT_PRICE=1, OUTPUT_PRICE=2):
 check("priced calls reserve and settle against the shared model cost limit",
       refused and priced.stopped == "model cost budget" and abs(priced.cost - 0.00003) < 1e-12
       and abs(priced.reserved_cost) < 1e-12)
+with patch.object(h, "RUN_MAX_TOKENS", 100):
+    shared = h.RunBudget(h.EFFORTS["medium"])
+    reservation = shared.reserve(40, 80)
+    shared.settle(reservation, h.Reply("done", [], prompt_tokens=20, output_tokens=5,
+                                     usage_complete=True))
+check("reply reservations shrink to remaining tokens and refund unused allowance",
+      reservation[:2] == (40, 60) and shared.tokens == 25 and shared.reserved_tokens == 0
+      and not shared.stopped)
+with patch.multiple(h, RUN_MAX_COST=0.0001, INPUT_PRICE=1, OUTPUT_PRICE=2):
+    priced = h.RunBudget(h.EFFORTS["medium"])
+    reservation = priced.reserve(40, 80)
+    priced.settle(reservation, None)
+check("reply reservations shrink to the remaining priced allowance",
+      reservation[:2] == (40, 30) and abs(priced.cost - 0.0001) < 1e-12
+      and priced.reserved_tokens == 0 and abs(priced.reserved_cost) < 1e-12)
+messages = [{"role": "user", "content": "[scenario:slow] reduced reply allowance"}]
+prompt_allowance = h.prompt_size(messages, []) + 4096
+with patch.object(h, "RUN_MAX_TOKENS", prompt_allowance + 25):
+    shared = h.RunBudget(h.EFFORTS["medium"])
+    token = h.BUDGET.set(shared)
+    try:
+        r0 = len(mock_llm.REQUESTS)
+        reply = h.call_model(messages, [], max_tokens=4096)
+    finally:
+        h.BUDGET.reset(token)
+check("the endpoint receives the reduced reply allowance, not the effort maximum",
+      mock_llm.REQUESTS[r0]["max_tokens"] == 25 and reply.text == "late answer"
+      and shared.reserved_tokens == 0 and shared.tokens == reply.prompt_tokens + reply.output_tokens)
 with patch.object(h, "RUN_MAX_TOKENS", 1):
     out, reqs, evs = run_at("medium", "[scenario:basic] token budget before request")
 check("token exhaustion stops before a model request is submitted",
@@ -772,6 +805,45 @@ check("workers receive skill summaries and only their required MCP capability",
 check("coordinator and workers share accounting for every model call",
       kinds(evs, "budget")[-1]["tokens"]
       == sum(e["prompt_tokens"] + e["output_tokens"] for e in kinds(evs, "model")))
+reviewer_requests = [r for r in reqs if r["messages"][0]["content"].startswith(
+    "You are an independent reviewer")]
+activity = json.loads(reviewer_requests[0]["messages"][1]["content"].split(
+    "\n\n[Runtime-observed tool activity]\n", 1)[1])
+check("fresh reviewers receive actual skill and worker evidence without inherited reasoning",
+      len(reviewer_requests[0]["messages"]) == 2
+      and all(offered(r) == {"read_file", "list_dir", "think"} for r in reviewer_requests)
+      and any(row["agent"] == "worker" and row["tool"] == "demo__add"
+              and row["result"] == "5" for row in activity)
+      and any(row["tool"] == "load_skill" and "Use demo__add" in row["result"] for row in activity)
+      and "Weighing the next step" not in reviewer_requests[0]["messages"][1]["content"])
+state = json.loads(h.checkpoint_file("[scenario:workflow] configured capabilities").read_text())
+r0, t0 = len(mock_llm.REQUESTS), len(h.TRACE_FILE.read_text().splitlines())
+resumed = h.run_agent("[scenario:workflow] configured capabilities", h.orchestrator_system(),
+                      ALL + names, effort="xhigh", resume=True)
+resume_events = [json.loads(line) for line in h.TRACE_FILE.read_text().splitlines()[t0:]]
+check("checkpoints retain procedural evidence for independent review after resume",
+      state["observations"] == activity and resumed == "DONE: sum=5"
+      and [e["passed"] for e in kinds(resume_events, "review")] == [True]
+      and not kinds(resume_events, "worker_start"))
+shared = h.RunBudget(h.EFFORTS["xhigh"])
+token = h.BUDGET.set(shared)
+scope = h.TOOL_SCOPE.set(tuple(ALL + names))
+try:
+    fresh = not shared.observations
+    verdict = h.review("[scenario:workflow] configured capabilities", "DONE: sum=5", "xhigh")
+    shared.observations = [{**row, "result": "DENIED: arithmetic was not approved"}
+                           if row["tool"] == "demo__add" else dict(row) for row in activity]
+    failed_evidence = h.review("[scenario:workflow] configured capabilities", "DONE: sum=5", "xhigh")
+    shared.observations = activity
+    with patch.object(h, "MAX_TOOL_CHARS", 256):
+        clipped_evidence = h.review("[scenario:workflow] configured capabilities", "DONE: sum=5", "xhigh")
+finally:
+    h.TOOL_SCOPE.reset(scope)
+    h.BUDGET.reset(token)
+check("missing, failed or clipped evidence cannot pass procedural review from existing files",
+      fresh and verdict.startswith("FAIL\nSkill or MCP worker evidence is missing")
+      and failed_evidence.startswith("FAIL\nSkill or MCP worker evidence is missing")
+      and clipped_evidence.startswith("FAIL\nRuntime tool evidence is missing or incomplete"))
 mcp_bridge.close()
 cli_env = dict(os.environ, AGENT_MCP_CONFIG=str(config_path), AGENT_AUTO_APPROVE="1",
                AGENT_WORKSPACE=str(tmp / "cli-workspace"), AGENT_TRACE=str(tmp / "cli-trace.jsonl"),

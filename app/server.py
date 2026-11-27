@@ -93,10 +93,13 @@ class Run:
             self.emit("approval", f'<div class="approval-request" id="approval-{approval_id}">'
                                   f"<p>The agent wants to use <code>{tool}</code>:"
                                   f"<br><code>{detail}</code></p>{buttons}</div>")
-            answered = self.answered.wait(h.time_left(APPROVAL_TIMEOUT))
-            h.time_left(APPROVAL_TIMEOUT)
-            with self.changed:
-                return answered and self.decision
+            while True:
+                answered = self.answered.wait(h.time_left(
+                    max(0, self.approval_deadline - time.monotonic())))
+                h.time_left(APPROVAL_TIMEOUT)
+                if answered or time.monotonic() >= self.approval_deadline:
+                    with self.changed:
+                        return answered and self.decision
         finally:
             with self.changed:
                 self.pending_approval = None

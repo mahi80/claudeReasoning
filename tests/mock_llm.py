@@ -94,6 +94,22 @@ def policy(body: dict) -> dict:
     j = json.dumps
     acted = sum(1 for m in msgs if m["role"] == "assistant" and m.get("tool_calls"))
     reviewer = msgs[0]["content"].startswith("You are an independent reviewer")
+    if reviewer and scenario == "workflow":
+        marker = "\n\n[Runtime-observed tool activity]\n"
+        try:
+            activity = json.loads(first_user.split(marker, 1)[1])
+        except (IndexError, ValueError):
+            return {"text": "FAIL\nRuntime tool evidence is missing or incomplete"}
+        observed = any(row["agent"] == "worker" and row["tool"] == "demo__add"
+                       and json.loads(row["arguments"]) == {"a": 2, "b": 3}
+                       and row["result"] == "5" for row in activity)
+        skilled = any(row["tool"] == "load_skill" and "Use demo__add" in row["result"]
+                      for row in activity)
+        if not observed or not skilled:
+            return {"text": "FAIL\nSkill or MCP worker evidence is missing"}
+        if not last:
+            return {"calls": [("read_file", j({"path": "report.txt"}))]}
+        return {"text": "PASS" if last[0] == "sum=5" else "FAIL\nReport is incorrect"}
     if reviewer and scenario != "review":
         return {"text": "PASS"}
 

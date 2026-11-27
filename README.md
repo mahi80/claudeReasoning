@@ -5,10 +5,15 @@ open-weight models (Gemma 4, Mistral Small 4, DeepSeek V4-Flash and V4.1-Flash) 
 Runpod on-demand Pods. It comes with a chat UI, on-demand GPU start and stop, and a
 design document that explains every part.
 
-> **Status.** All 223 automated checks pass locally, including task graders and real-browser checks.
-> Model and Runpod integration checks use mock endpoints. No reproducible live GPU
-> benchmark results are committed. The serve commands and thinking switches need
-> validation on the intended deployment.
+> **Status.** Local automated checks use mock model/Runpod endpoints. The current
+> local fixes were separately revalidated on one B300 with DeepSeek V4-Flash and
+> vLLM 0.34.0 on 27 November 2026, using an uncommitted snapshot based on `f00e4ea`.
+> Decode CUDA graphs replaced eager execution: the original workflow passed 17/17
+> checks with independent PASS in 63.9 seconds under the unchanged 600-second limit.
+> Four selected cases at low/medium passed 8/8 under the original 90-second limits.
+> Failed eager baselines are preserved. This is not a full 18-case benchmark or
+> production-readiness evidence; see [`infra/runpod.md`](infra/runpod.md) for the
+> tested configuration, safety checks and remaining deployment-specific limits.
 
 ## What is in here
 
@@ -77,10 +82,12 @@ parts it controls. Pick a level per task with `--effort`, the `effort=` argument
 
 What sits behind the columns, all in `harness/mini_harness.py`:
 
-- **The model's own thinking** is switched per call through `LLM_THINKING`, a small JSON
-  map of request fields for `off`, `on` and `max`. The fields differ per model;
-  [`infra/runpod.md`](infra/runpod.md) has them for Gemma 4, Mistral Small 4 and
-  DeepSeek V4-Flash and V4.1-Flash.
+- **The model's own thinking** uses `LLM_THINKING`, a JSON map of request fields for
+  `off`, `on` and optionally `max` and `brief`. The default `LLM_THINKING_SCOPE=step`
+  switches medium effort on its first step and after failed tools. Use `task` for
+  conversation-level thinking: medium then uses `brief` throughout, or `on` if no
+  `brief` is defined; low stays off and high stays on. The fields differ per model;
+  [`infra/runpod.md`](infra/runpod.md) has them for each supported preset.
 - **One line of guidance per level** is added to every system prompt (`GUIDANCE`).
 - **A `think` tool** gives the model a place to reason between tool calls.
 - **Self-check** (high and above): before an answer is accepted, the model checks it
@@ -90,18 +97,27 @@ What sits behind the columns, all in `harness/mini_harness.py`:
   including an empty or unfinished review, rejects the answer. Xhigh allows one
   correction round and max allows two; every corrected answer is reviewed again.
   Exhausting the budget returns an explicit stopped result, not an unreviewed draft.
+  The reviewer receives runtime-observed tool arguments/results, including loaded skills
+  and worker calls, alongside the task and answer, but not the coordinator's reasoning.
+  It still inspects workspace artifacts; clipped evidence is explicitly incomplete.
+  Checkpoints preserve these observations across compaction and manual resume, and the
+  trace records reviewer verdicts for diagnosis.
 - **Escalation** (`--escalate`, `run_escalating`): start cheap and climb a level when a
   run stalls or a check you supply rejects the answer.
 
 Choose a level from data, not by feel:
 
 ```bash
-AGENT_WORKSPACE=/tmp/eval-workspace python harness/run_evals.py evals/tasks.jsonl 3 \
+AGENT_WORKSPACE=/tmp/eval-workspace python harness/run_evals.py evals/tasks.agent.jsonl 3 \
     --effort low medium high
 ```
 
 The last lines of the output give pass rate, steps and output tokens per level.
-Failed or stopped runs always fail grading, even if their files satisfy an artifact-only check.
+`evals/tasks.agent.jsonl` contains 18 cases; `evals/tasks.example.jsonl` is the smaller
+example. `--shard 0/2` and `--shard 1/2` split cases over two processes; use different
+workspace, trace and checkpoint paths for each process. Each run's workspace is retained
+under its output folder for inspection. Failed or stopped runs always fail grading,
+even if their files satisfy an artifact-only check.
 
 None of this adds reasoning ability the model does not have. It helps a model use what
 it has: fewer slips, fewer early exits, a second look. If high effort still fails your
@@ -123,15 +139,18 @@ Otherwise:
 ```bash
 pip install -r requirements.txt
 
-python tests/test_harness.py      # 119 checks: tools, context, reviews, MCP config, scoped workers and budgets
+python tests/test_harness.py      # 126 checks: tools, context, review evidence, MCP config, workers and budgets
 python tests/test_evals.py        # 5 checks: grading, failure scoring and effort comparison
 python tests/test_eval_cases.py   # 43 checks: task graders, reference solutions and near-misses
 python tests/test_app.py          # 34 checks: chat UI, pod manager, approvals and budget deadlines
 python tests/test_ui_browser.py   # 22 checks in Chrome, including the complete skill/worker/MCP flow
 ```
 
-Browser checks additionally need `pip install playwright` and installed Chrome or
-Chromium. Missing prerequisites produce a skip, not verification.
+All 230 checks passed locally on 27 November 2026. Browser checks additionally need
+`pip install playwright` and installed Chrome or Chromium. Missing prerequisites produce
+a skip, not verification. If HTTPX rejects an IPv6 entry in your proxy exclusions, run
+local checks with `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost` for that
+process only.
 
 ### Run it against your own model
 
@@ -203,8 +222,12 @@ this configuration at untrusted executables. Connections close on normal CLI/UI 
 
 The coordinator, workers, reviewers, compaction and effort escalation share one
 execution budget. Before a model call starts, its conservative prompt estimate and
-maximum reply are reserved atomically, so parallel workers cannot spend the same
-remaining allowance. Complete endpoint usage releases unused reservations; missing
+reply allowance are reserved atomically, so parallel workers cannot spend the same
+remaining allowance. The reply cap shrinks to the remaining token/cost allowance
+instead of rejecting a call solely because the full effort-level reply cap will not fit.
+If the prompt plus even one reply token cannot fit, the run stops. Prompt estimation
+remains conservative, not exact model tokenization. Complete usage releases unused
+reservations; missing
 usage and failed calls retain conservative accounting. Exhaustion returns a stopped
 result, and escalation cannot reset the budget.
 
@@ -247,7 +270,8 @@ that GPU, so it cannot decide its own start.
 | `LLM_MODEL` | `agent-model` | Served model name |
 | `LLM_TEMPERATURE` | `0.2` | Sampling temperature; see the model's recipe |
 | `LLM_EXTRA_BODY` | `{}` | Extra request fields sent on every call, as JSON (for example `top_p`) |
-| `LLM_THINKING` | `{}` | Request fields that switch the model's thinking: JSON with `off`, `on` and optionally `max` |
+| `LLM_THINKING` | `{}` | Request fields for `off`, `on` and optionally `max` and `brief` |
+| `LLM_THINKING_SCOPE` | `step` | `task` keeps medium thinking on throughout, using `brief` if present |
 | `LLM_KEEP_REASONING` | `0` | `1` sends the model's reasoning back with each tool-call turn (Gemma 4, DeepSeek V4) |
 | `LLM_CONTEXT_WINDOW` | `32768` | Match the server's `--max-model-len`; requests reserve reply and template space |
 | `AGENT_WORKSPACE` | `workspace` | File-tool boundary and shell working directory; approved shell commands are not jailed |
@@ -290,12 +314,25 @@ All thirteen configurations, the price table and the caveats are in
 [`infra/runpod.md`](infra/runpod.md). Runpod changes prices often: edit `RATE` in
 [`infra/costs.py`](infra/costs.py) and run it to recalculate.
 
+### Disposable GPU validation
+
+`infra/pod_test.sh` runs on the selected Linux GPU pod, not on your desktop. It supports
+`gemma4`, `deepseek-v4` (one B300) and `deepseek-v41` (four H200), with `setup`, `serve`,
+`smoke` and `evals` steps. It binds vLLM to localhost. See
+[`infra/runpod.md`](infra/runpod.md) for settings, sharding, saved outputs and the
+32K context used in the actual DeepSeek experiment. The script installs the then-current
+vLLM; pin the tested image/model revision separately for reproducibility. It does not
+stop the GPU or cap rental spending: export results and stop the pod yourself.
+
 ## Limits you should know about
 
-- **Not tested on real GPUs.** Run `harness/smoke_test.py` and your own evals first.
-- **The thinking switches are untested on live models.** They come from the vLLM
-  documentation, recipes and source as of 27 November 2026. Run the smoke test with
-  `LLM_THINKING` set before trusting any level above low.
+- **Live coverage remains limited.** The graph-enabled B300 revalidation passed the
+  scoped skill/worker/MCP workflow with strict independent review, plus four selected
+  cases at low/medium. Failed eager baselines are preserved; this is not the full
+  18-case benchmark. Run the smoke test and your own evals before deployment.
+- **Most serving/thinking presets remain untested live.** Only the DeepSeek V4-Flash
+  0731 configuration above had live protocol/thinking probes. Gemma, Mistral, V4.1,
+  larger contexts and max-thinking configurations still need deployment-specific tests.
 - **Higher effort costs more.** High and above think on every call and add at least one
   more model call per task; a review is a second agent run.
 - **Workspace file writes are permitted without approval.** `write_file`, `edit_file`

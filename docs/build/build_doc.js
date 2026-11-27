@@ -10,7 +10,7 @@ const {
 const costs = JSON.parse(fs.readFileSync("docs/build/out/costs.json", "utf8"));
 const ex = JSON.parse(fs.readFileSync("docs/build/out/excerpts.json", "utf8"));
 const efforts = JSON.parse(fs.readFileSync("docs/build/out/efforts.json", "utf8"));
-const CHECKS = { harness: 58, evals: 2, app: 22, browser: 11 };   // update with the tests
+const CHECKS = { harness: 126, evals: 5, eval_cases: 43, app: 34, browser: 22 };
 const TOTAL_CHECKS = Object.values(CHECKS).reduce((a, b) => a + b, 0);
 
 const W = 9026; // content width in DXA: A4 with 1-inch side margins
@@ -136,14 +136,14 @@ add(
   new Paragraph({ spacing: { after: 80 }, children: [new TextRun({ text: "How the reference harness works, how to build the same thing, and what it needs on Runpod on-demand Pods", size: 24, color: GREY })] }),
   new Paragraph({
     spacing: { after: 200 }, border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: NAVY, space: 6 } },
-    children: [new TextRun({ text: "Version 1.2  |  27 November 2026  |  Companion code: github.com/mahi80/claudeReasoning", size: SMALL, color: GREY })],
+    children: [new TextRun({ text: "Version 1.3  |  27 November 2026  |  Companion code: github.com/mahi80/claudeReasoning", size: SMALL, color: GREY })],
   }),
   callout("Read this first", [
     "**Scope.** A pilot for one team (roughly 1 to 10 agent sessions at a time) on Runpod on-demand Pods, with Gemma 4, Mistral Small 4, DeepSeek V4-Flash or DeepSeek V4.1-Flash served by vLLM.",
     "**Prices.** Read from runpod.io/pricing on 27 November 2026 (Secure Cloud, on-demand). Runpod changes rates often, so confirm in the console before budgeting.",
-    "**Code.** The Python in the companion repository passed " + TOTAL_CHECKS + " automated checks, all against mock endpoints (a mock model server and a mock Runpod API). Nothing here was run on live GPUs. The serve commands come from the vLLM recipes.",
+    "**Code.** The companion repository passed " + TOTAL_CHECKS + " local automated checks; model/Runpod integrations use mocks. Current local fixes were separately GPU-revalidated on 27 November 2026 as an uncommitted snapshot based on f00e4ea. DeepSeek V4-Flash on one B300 with decode CUDA graphs passed the original workflow 17/17 with independent PASS in 63.9 seconds under the unchanged 600-second limit. Four selected cases at low/medium passed 8/8 under the original 90-second caps. Failed eager baselines are preserved; this is not the full 18-case benchmark or production-readiness evidence.",
     "**Section 2** describes Claude's own harness as the model sees it from inside the loop. The harness source code is not visible to the model, so read it as an informed description, not a specification.",
-    "**New in version 1.2.** DeepSeek V4.1-Flash is sized: section 4.4, with rows in 5.3 and 5.4, a serve command in 5.7 and its thinking switch in 6.13. Version 1.1 added effort levels (sections 2.6 and 6.13).",
+    "**New in version 1.3.** Scoped worker grants, command-specific approvals, shared execution budgets, strict PASS reviews with runtime tool evidence, and regenerated code listings. The live workflow and safety checks pass on the documented B300 configuration; broader deployment reliability remains unproven.",
   ]),
   gap(200),
   new Paragraph({ spacing: { after: 80 }, children: [new TextRun({ text: "Contents", bold: true, color: NAVY, size: 24 })] }),
@@ -161,19 +161,19 @@ add(
   pageBreak(), H1("1. Summary"),
   P("The agent this document copies is small. A model reads the conversation, asks for a tool, receives the result, and repeats until it answers in plain text. There is no graph framework. The routing lives in plain-language instructions and tool descriptions, and the model decides the next step on every turn."),
   P("The same design runs on open-weight models. What changes is reliability: open models call tools less dependably, so the model server and the harness have to enforce more."),
-  H3("Recommended starting point"),
+  H2("Recommended starting point"),
   table(["Decision", "Recommendation", "Why"], [
     ["Model", "Gemma 4 26B-A4B, BF16", "Apache 2.0, native function calling, fits one 80 GB GPU"],
     ["Pod", "1x A100 PCIe 80 GB at " + money(byId.A1.hourly) + "/h, or 1x H100 PCIe 80 GB at " + money(byId.A2.hourly) + "/h (Secure Cloud)", "This configuration is in the vLLM Gemma 4 recipe"],
     ["Serving", "vLLM with a pinned image tag, the tool-call parser for the exact model version, strict tool schemas and an API key", "Parsers are version-specific, and the Runpod proxy URL is public"],
-    ["Harness", "About 620 lines of Python: loop, tools, subagents, skills, plan, checkpoints, compaction, effort levels, trace", "In the companion repository, tested against a mock endpoint"],
+    ["Harness", "Readable Python loop, scoped tools/subagents, skills, plan, checkpoints, context guards, effort levels, shared budgets and trace", "Local regression coverage; live end-to-end reliability still unresolved"],
     ["Effort", "Five levels from low to max, set per task. Medium is the default; choose per workload from the eval comparison", "Sections 2.6 and 6.13"],
     ["Front end", "HTMX chat page on FastAPI with live progress, approvals and on-demand GPU start", "Section 7; tested in headless Chrome"],
     ["Monthly cost", whole(byId.A1.work_total) + " to " + whole(byId.A2.work_total) + " at 176 working hours, storage included", "Section 5.4"],
     ["Next step up", "A bake-off on your own evals: Gemma 4 31B (" + money(byId.B1.hourly) + "/h), Mistral Small 4 (" + money(byId.C1.hourly) + "/h), DeepSeek V4.1-Flash (from " + money(byId.E2.hourly) + "/h) or V4-Flash (from " + money(byId.D3.hourly) + "/h)", "Choose from eval results and cost, not from model cards"],
   ], [0.16, 0.5, 0.34]),
   gap(),
-  H3("Three things decide whether it works"),
+  H2("Three things decide whether it works"),
   ...numbered([
     "**Tool-call reliability.** Enforced in the server with strict schemas, and in the loop with error feedback, repeat detection and a step cap.",
     "**Context discipline.** Clip tool output, fold old turns into a summary, and give heavy reading to subagents with their own context.",
@@ -235,7 +235,7 @@ add(
     ["Subagents as context isolation", "Heavy or independent chunks go to workers and only reports come back. On a long run this protects the main context more than it saves time.", "`spawn_agent`"],
     ["Compaction", "Older turns are folded into a summary when the prompt passes its budget.", "`compact`"],
     ["Checkpoints", "State is saved after every finished step, so a crash or a stopped pod loses at most one step.", "`save_checkpoint`; `resume=True` or `--resume`"],
-    ["Budgets", "Caps on steps, time and spend force a stop-and-report instead of drift.", "A step cap per agent, set by the effort level (2.6); add time and spend caps for production"],
+    ["Budgets", "Caps on steps, shared time/tokens and optional model-token cost force an explicit stopped result.", "RunBudget covers workers, review, compaction and escalation; GPU setup/rental is separate"],
   ], [0.22, 0.5, 0.28]),
   note("In Claude's own harness the same roles are played by a task list the model maintains, skills loaded on demand and subagents."),
 );
@@ -542,7 +542,7 @@ add(
     "Use short sentences. End with a list of open items.",
   ]),
   H2("6.8 Context control"),
-  P("When the prompt passes its token budget, older turns are replaced by a summary the model writes for itself. The summary is folded into the first user message, so the roles still alternate for chat templates that insist on it, a tool result is never separated from its call, and the kept turns always open on an assistant message."),
+  P("Every model request, including compaction, checks a conservative serialized-JSON byte estimate of messages and tool schemas, plus reply and template space. This is not exact model tokenization. Older turns are summarized into the first user message without orphaning tool results. Oversized pinned task, plan or schemas fail clearly rather than silently losing instructions."),
   ...code(ex.context),
   ...bullets([
     "Set `AGENT_CONTEXT_BUDGET` to roughly 60% of the server's `--max-model-len`, and give the harness that window as `LLM_CONTEXT_WINDOW`. Higher effort levels reserve more of the window for the reply, so the harness lowers the prompt budget to keep the two inside it.",
@@ -557,10 +557,12 @@ add(
     "Checkpoints are written with an atomic rename, so a crash in mid-write leaves the previous checkpoint intact.",
     "Only the orchestrator plans and checkpoints. Workers are short-lived by design: if one fails, the orchestrator receives an error report and decides again.",
     "On-demand pods are why resume matters. When the idle watchdog or a capacity problem stops the GPU, the task continues from its last step once the pod is back.",
-    "The step cap comes from the effort level: 8 to 150 steps for the main agent and at most 40 for a worker. `AGENT_MAX_STEPS` lowers it for every level. For production add wall-clock and spend limits, and make the stop message say what is left.",
+    "The step cap comes from the effort level: 8 to 150 steps for the main agent and at most 40 for a worker. `AGENT_MAX_STEPS` lowers it. A shared RunBudget defaults to 900 seconds and 100,000 model tokens; `AGENT_MAX_COST_USD` adds a cost cap when both endpoint token prices are set. GPU/MCP startup and rental are not covered.",
+    "Conservative prompt and reply allowances are reserved atomically. Reply caps shrink to the remaining token/cost allowance; complete usage refunds unused reservations, while failed calls/missing usage retain conservative accounting. Escalation cannot reset the budget; separate manual resumes start fresh budgets.",
+    "Checkpoints also preserve runtime tool arguments/results from workers and the coordinator. Independent review uses these receipts for procedural checks and still inspects artifacts; clipped evidence is incomplete, not permission to invent results.",
   ]),
   H2("6.10 Guardrails"),
-  P("File tools are confined to the workspace. Shell commands run without approval only when they are a single allow-listed read-only command with no shell operators and no path that leaves the workspace. Everything else waits for a person. The shell gets a stripped environment."),
+  P("Workspace file writes, edits and plan updates are permitted without approval. Automatic shell reads validate literal workspace paths and a limited flag set, then run without shell interpretation; other shell commands and all MCP calls need command-specific approval. Concurrent approvals are serialized, stale decisions are rejected, and waits respect the shared deadline. The shell gets a stripped environment; approved shell commands are not jailed."),
   ...code(ex.guard),
   P("This is a permission layer, not a sandbox. Runpod pods cannot run nested containers, so put the workspace on a separate disposable pod or VM that holds no credentials."),
   H2("6.11 MCP servers"),
@@ -584,7 +586,7 @@ add(
   ...code(ex.trace),
   P("The eval runner replays a task file and scores each run from the workspace and the trace. The number is the repeat count. Name several effort levels and the output ends with one line per level, so what a level gains and what it costs sit side by side."),
   ...code([
-    "AGENT_WORKSPACE=/tmp/eval-workspace python harness/run_evals.py evals/tasks.jsonl 3 \\",
+    "AGENT_WORKSPACE=/tmp/eval-workspace python harness/run_evals.py evals/tasks.agent.jsonl 3 \\",
     "    --effort low medium high",
   ]),
   table(["Metric", "Meaning", "Use"], [
@@ -594,7 +596,7 @@ add(
     ["tool_failure_rate", "Tool calls that came back as ERROR or DENIED", "Tracks schema and description problems"],
     ["step_limit_rate", "Runs stopped by the step cap", "Tracks loops and tasks that are too big"],
   ], [0.22, 0.4, 0.38]),
-  note("Each eval case is a task, optional starting files and a shell check that runs in the workspace with the final answer on standard input. Start with 20 to 30 real tasks and run each several times, because the same model does not behave identically twice."),
+  note("The committed tasks.agent.jsonl contains 18 cases with starting files and graders; tasks.example.jsonl is smaller. Failed/stopped runs fail grading even if artifacts look correct. --shard 0/2 and 1/2 split cases across processes: use separate workspace, trace and checkpoint paths. infra/pod_test.sh supports setup/serve/smoke/evals, EVALS, EFFORTS, SHARDS and OUT; levels/shards run concurrently. Export outputs and stop the GPU yourself: the script does not cap rental spending. Repeat cases because model behavior varies."),
 );
 
 const thinkingLabel = {
@@ -619,7 +621,7 @@ add(
   ]),
   P("In the chat UI the level is the picker beside the Send button. Medium is the default everywhere."),
   H3("Switching the model's own thinking"),
-  P("Each model exposes thinking through different request fields, so the harness keeps them in configuration, not code. `LLM_THINKING` holds up to three request fragments named `off`, `on` and `max`. Before each call the harness picks one from the effort level and merges it into the request. A fragment may carry any request field, so it can also set the temperature for thinking calls or vLLM's `thinking_token_budget`, a per-request cap on reasoning tokens. `LLM_KEEP_REASONING=1` sends the model's reasoning back with each tool-call turn; the third column says which models want that. [S26]"),
+  P("Thinking fields stay in configuration: LLM_THINKING has off/on and optional max/brief fragments. LLM_THINKING_SCOPE=step is the default; task keeps medium on throughout, using brief if defined, otherwise on. Low stays off and high stays on. Use task scope for conversation-level thinking such as Gemma (the pod-test preset does). Fragments may adjust temperature or thinking_token_budget, but cannot override messages, tools or reply/context limits. LLM_KEEP_REASONING=1 returns reasoning between tool turns. [S26]"),
   table(["Model", "`LLM_THINKING` fragments", "Send thoughts back", "Watch for"], [
     ["Gemma 4",
       "off: `{\"chat_template_kwargs\": {\"enable_thinking\": false}}`\non: `{\"chat_template_kwargs\": {\"enable_thinking\": true}}`",
@@ -660,7 +662,7 @@ add(
     ["Effort line in the prompt", "One sentence per level, added to every system prompt, tells the model how thorough to be. Google reports about 20% fewer thinking tokens from a low-effort instruction of this kind on Gemma 4, and DeepSeek's own high and max modes prepend one. [S27] [S28] [S29]", "All"],
     ["`think` tool", "A tool that does nothing except give the model a place to reason between other calls. Anthropic introduced the pattern for long tool chains and policy-heavy tasks, and now points to built-in thinking for the same benefit. Here it covers the steps where the model's own thinking is switched off. [S30]", "medium"],
     ["Self-check", "Before a final answer is accepted, the model is asked once to check it against the task with its tools. It replies CONFIRMED to keep the answer, or fixes the problem and answers again.", "high"],
-    ["Independent review", "A second agent with a fresh context and read-only tools sees only the task and the answer, and replies PASS or FAIL. A FAIL goes back to the first agent with the reasons. Any other verdict is accepted, so a confused reviewer cannot stall the run.", "xhigh: one review\nmax: two"],
+    ["Independent review", "A fresh-context read-only agent sees task, answer and runtime-observed tool evidence, not coordinator reasoning. Only PASS alone on the first non-empty line accepts (case-insensitive). FAIL, ambiguous, empty or stopped verdicts reject. Corrections are re-reviewed; exhausted budgets return stopped results. The trace retains verdict text.", "xhigh: 1 correction round\nmax: 2 correction rounds"],
     ["Escalation", "`run_escalating` starts at a cheap level and climbs one level when a run stops at its step cap (it resumes from the checkpoint) or when a check you supply rejects the answer.", "Optional: `--escalate`"],
   ], [0.2, 0.6, 0.2]),
   gap(),
@@ -677,10 +679,12 @@ add(
     "**An independent mind.** The reviewer is the same model, so it shares the first agent's blind spots. A check written in code, such as tests that must pass or a schema that must validate, is stronger wherever one exists. Pass it to `run_escalating` as `accept`.",
     "**Free thoroughness.** Every mechanism costs tokens and time, and more thinking is not always better: Anthropic notes that its top level can lead to overthinking on structured or simpler tasks. [S25]",
   ]),
-  callout("Not verified on a GPU", [
-    "The request fields in the table come from the vLLM documentation, the model recipes and the vLLM source as it stood on 27 November 2026 (commit c58be70). They were not run against a live model, and an older pinned image can behave differently.",
-    "The harness logic was tested against a mock server that switches thinking on a `reasoning_effort` field, the way Mistral Small 4 does.",
-    "On your pod, run the smoke test with `LLM_THINKING` set before trusting any level above low.",
+  callout("Live validation is partial, not a readiness result", [
+    "The table comes from vLLM documentation, recipes and source at c58be70 (27 November 2026). The initial one-B300 experiment used vLLM 0.34.0, DeepSeek V4-Flash-0731 revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062, 32,768 context, at most two sequences and eager execution. At commit f00e4ea, protocol probes passed 8/8 and budget-stop checks 4/4, but both workflows timed out at 600 seconds and selected low/medium cases passed 3/8. These failed baselines are preserved.",
+    "Current local fixes were revalidated as an uncommitted snapshot based on f00e4ea. On the same B300/model/version, removing --enforce-eager enabled kernel warmup and mode-0 FULL_DECODE_ONLY CUDA graphs with capture sizes [1,2]. The original workflow passed 17/17 with an actual independent reviewer workspace read and PASS in 63.9 seconds; its 600-second limit, xhigh/high-native thinking, scopes and approvals were unchanged. The tested serve command is in infra/runpod.md.",
+    "Protocol probes passed 8/8, budget stops 4/4 and missing/denied reviewer-evidence rejection 3/3. Separately labeled token/cost admission checks passed 7/7; the original exact-OK formatting failure is preserved. Four selected cases at low/medium passed 8/8 under both the original 90-second and separately labeled 180-second limits. This is not the full 18-case benchmark. Larger contexts, max thinking and other models remain unvalidated.",
+    "The pod_test.sh V4 preset defaults to 131,072 context. If SERVE_EXTRA changes the server window, run the harness directly with matching LLM_CONTEXT_WINDOW; the script sets its own preset client value. Both evidence archives were downloaded and all output/source hashes verified before stopping the new pod. Compute and container storage were confirmed at $0/hour; conservative new spend was $11.05 within the $20 cap, not a final invoice. Agent budgets do not cap rental costs.",
+    "Run the smoke test with LLM_THINKING and your own evals before trusting the intended deployment. Passing this limited revalidation is not production-readiness evidence.",
   ]),
   gap(),
 );
@@ -760,7 +764,7 @@ add(
     ["Endpoint", "Set an API key. Remember that vLLM's key protects only the /v1, /v2 and /inference paths; other endpoints such as /invocations stay open, and vLLM's own documentation says not to rely on the key alone. For anything sensitive, do not expose port 8000: use private networking, a tunnel or an authenticating reverse proxy. [S3] [S11]"],
     ["Data location", "Use Secure Cloud for client data and choose the data centre for residency. Network volumes and container disks cannot be encrypted, so keep sensitive data off them or encrypt it in the application. [S5]"],
     ["Model supply chain", "Pin model revisions. Use `--trust-remote-code` only for repositories you have reviewed."],
-    ["Agent actions", "Approval for anything that is not read-only; workspace confinement; no credentials in the agent's environment; a separate sandbox pod or VM."],
+    ["Agent actions", "Workspace file writes/plan updates are permitted; shell commands outside the checked automatic-read subset and all MCP calls need specific approval. File tools are confined, but approved shell commands are not jailed. Use a separate sandbox without credentials."],
     ["Prompt injection", "Treat tool, web and MCP output as data. Never let it trigger a privileged tool without approval."],
     ["Chat UI", "Add authentication. Escape all model output. Give each session its own workspace."],
     ["Audit", "Keep the trace with the run id for every model call and tool call, alongside the eval reports."],
@@ -815,16 +819,17 @@ add(
     ["`app/server.py`, `app/static/`", "HTMX chat UI on FastAPI; htmx 2.0.10 and its SSE extension 2.2.4"],
     ["`infra/runpod.md`, `infra/costs.py`", "Pod template settings, serve commands and the cost arithmetic"],
     ["`skills/`, `evals/`", "An example skill and example eval tasks"],
-    ["`tests/`", "Mock model endpoint, mock Runpod API and four test scripts"],
+    ["`tests/`", "Mock model endpoint, mock Runpod API and five test scripts"],
   ], [0.36, 0.64]),
   gap(),
   table(["Test script", "Checks", "What it proves"], [
-    ["`tests/test_harness.py`", String(CHECKS.harness), "Tool loop; recovery from bad JSON and unknown tools; repeat detection; parallel subagents with fresh context and no nesting; compaction; step cap; pinned plan; checkpoint and resume; approvals; workspace confinement; skills; ordered execution; MCP bridge; streaming; smoke test; API key. Effort levels: the thinking switch on each step, reply and worker budgets, self-check, reviewer, retry of an empty reply, returned reasoning, escalation, window-aware budgets"],
-    ["`tests/test_evals.py`", String(CHECKS.evals), "Eval runner scoring and metrics on four cases; the comparison of three effort levels"],
-    ["`tests/test_app.py`", String(CHECKS.app), "One pod start for concurrent requests; status stream; approvals; escaping; the effort picker; review status lines; replay for a reconnecting browser; idle stop and restart; start-timeout error"],
-    ["`tests/test_ui_browser.py`", String(CHECKS.browser), "Headless Chrome: HTMX wiring, live updates, approval buttons, effort picker, plan checklist, no JavaScript errors"],
+    ["`tests/test_harness.py`", String(CHECKS.harness), "Tool/error recovery, context preflight/compaction, plan/checkpoints, checked shell reads, scoped workers and MCP allowlists, streamed thinking, effort/self-check/escalation, strict PASS. Runtime skill/worker evidence and resume isolation; verdict tracing; atomic adaptive token/cost reservations and complete/missing usage accounting"],
+    ["`tests/test_evals.py`", String(CHECKS.evals), "Eval runner scoring/effort comparison; failed or stopped runs cannot pass artifact-only grading"],
+    ["`tests/test_eval_cases.py`", String(CHECKS.eval_cases), "All 18 task graders, reference solutions, accepted variants and near-miss rejection"],
+    ["`tests/test_app.py`", String(CHECKS.app), "Concurrent pod starts, status/reconnect streams, serialized command-specific approvals, stale-decision rejection, deadline/early-wake cleanup, escaping, effort/review progress, idle restart and timeout"],
+    ["`tests/test_ui_browser.py`", String(CHECKS.browser), "Chrome: HTMX updates, concurrent approvals, stale responses, strict review failure/recovery, complete plan/skill/scoped-worker/MCP flow, shared budget stops and no JavaScript errors"],
   ], [0.28, 0.1, 0.62]),
-  note("Tested with Python 3.13, openai 3.60.0, mcp 2.3.0, fastapi 0.165.0 and uvicorn 0.54.0. Every check ran against mock endpoints. None ran against a live GPU or the real Runpod API."),
+  note("All " + TOTAL_CHECKS + " local checks passed on Windows with Python 3.14; model/Runpod integrations use mock endpoints. These checks are separate from the partial live DeepSeek experiment described above. Browser checks require installed Chrome/Chromium and Playwright; a prerequisite skip is not verification."),
 );
 
 // ---------------------------------------------------------------- appendix B
