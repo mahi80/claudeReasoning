@@ -108,6 +108,20 @@ parts = out.split(" || ")
 check("shell approvals", len(parts) == 3 and parts[0].startswith("DENIED") and parts[1].startswith("DENIED")
       and parts[2].startswith("exit=0"), out)
 
+# with nobody to approve, the model is told so up front, and told what to use instead
+sent = [r for r in mock_llm.REQUESTS if "[scenario:denied] shell" in json.dumps(r["messages"][:2])]
+check("unattended run: said in the system prompt and in the refusal",
+      h.unattended() and h.UNATTENDED in sent[0]["messages"][0]["content"]
+      and parts[0].startswith("DENIED: nobody is available to approve run_shell in this run")
+      and "write_file" in parts[0], parts[0])
+h.ask_operator = lambda name, args: False              # an operator who says no
+out = h.run_agent("[scenario:denied] with an operator", SYSTEM, ALL)
+sent = [r for r in mock_llm.REQUESTS if "with an operator" in json.dumps(r["messages"][:2])]
+h.ask_operator = h.no_operator
+check("attended run: no such notice, and the refusal is the operator's",
+      "Nobody is available" not in sent[0]["messages"][0]["content"] and out.split(" || ")[0]
+      == "DENIED: the operator did not approve this action. Continue without it.", out)
+
 cases = {"ls -la": True, "grep -n TODO notes/a.txt": True, "ls && rm x": False, "cat a > b": False,
          "cat /etc/passwd": False, "cat ../secret": False, "find . -delete": False, "rm x": False,
          "ls $(rm x)": False, "": False, "cat 'unterminated": False}
@@ -186,11 +200,33 @@ check("medium: thinking on the first step only", thinking(reqs) == [True, False,
 check("reasoning is read from its own field and traced",
       [e["reasoning_chars"] > 0 for e in kinds(evs, "model")] == [True, False, False]
       and all(e["output_tokens"] == 10 for e in kinds(evs, "model")))
+check("the trace records which thinking each call asked for",
+      [e["thinking"] for e in kinds(evs, "model")] == ["on", "off", "off"])
 out, reqs, evs = run_at("medium", "[scenario:badjson] think after the error")
 check("medium: thinking returns after a failed tool call",
       out == "recovered" and thinking(reqs) == [True, True, False], str(thinking(reqs)))
 check("a thinking fragment can carry other request fields",
       [r["temperature"] for r in reqs] == [0.7, 0.7, 0.2], str([r["temperature"] for r in reqs]))
+
+# a model that cannot switch thinking mid-task gets one choice per task instead
+h.THINKING_SCOPE = "task"
+out, reqs, evs = run_at("medium", "[scenario:basic] medium, one choice per task")
+check("task scope: medium thinks on every step",
+      thinking(reqs) == [True] * 3 and [e["thinking"] for e in kinds(evs, "model")] == ["on"] * 3,
+      str(thinking(reqs)))
+h.THINKING["brief"] = {"reasoning_effort": "high", "thinking_token_budget": 256}
+out, reqs, evs = run_at("medium", "[scenario:basic] medium, thinking with a budget")
+check("task scope: medium uses the brief fragment when one is defined",
+      [r.get("thinking_token_budget") for r in reqs] == [256] * 3
+      and [e["thinking"] for e in kinds(evs, "model")] == ["brief"] * 3,
+      str([r.get("thinking_token_budget") for r in reqs]))
+out, reqs, evs = run_at("low", "[scenario:basic] low, task scope")
+_, high, _ = run_at("high", "[scenario:verify] high, task scope")
+check("task scope: low stays off and high stays fully on",
+      thinking(reqs) == [False] * 3 and all(thinking(high))
+      and all("thinking_token_budget" not in r for r in reqs + high))
+del h.THINKING["brief"]
+h.THINKING_SCOPE = "step"
 
 # high: thinking on every call, a larger reply budget, and one self-check
 out, reqs, evs = run_at("high", "[scenario:verify] check before answering")

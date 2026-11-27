@@ -37,7 +37,8 @@ CONTEXT_WINDOW = int(os.environ.get("LLM_CONTEXT_WINDOW", "32768"))    # --max-m
 AUTO_APPROVE = os.environ.get("AGENT_AUTO_APPROVE", "0") == "1"
 TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))      # see the model card
 EXTRA_BODY = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))    # sent on every call
-THINKING = json.loads(os.environ.get("LLM_THINKING", "{}"))        # off / on / max
+THINKING = json.loads(os.environ.get("LLM_THINKING", "{}"))        # off / on / max / brief
+THINKING_SCOPE = os.environ.get("LLM_THINKING_SCOPE", "step")      # step | task
 KEEP_REASONING = os.environ.get("LLM_KEEP_REASONING", "0") == "1"
 MAX_TOOL_CHARS = 6000   # tool output handed back to the model
 KEEP_RECENT = 8         # messages kept word for word when compacting
@@ -98,14 +99,19 @@ def budgets(effort: Effort) -> tuple[int, int]:
     return max_tokens, min(CONTEXT_BUDGET, CONTEXT_WINDOW - max_tokens - 4096)
 
 
-def thinking_extras(effort: Effort, step: int, turns: list[dict]) -> dict:
-    """Request fields that switch the model's own thinking for this one call.
+def thinking_mode(effort: Effort, step: int, turns: list[dict]) -> str:
+    """Which LLM_THINKING fragment this one call gets: off, on, brief or max.
 
     'key' pays for thinking only where it matters most: the first step, and the step
-    after a tool call failed. LLM_THINKING maps off / on / max to your model's fields.
+    after a tool call failed. Not every model can change mid-task: with its reasoning
+    kept in the history, Gemma 4 goes on thinking after one step that thought. For those
+    set LLM_THINKING_SCOPE=task. 'key' is then one choice for the whole task: the
+    'brief' fragment if you defined one (thinking with a budget), otherwise 'on'.
     """
     mode = effort.thinking
-    if mode == "key":
+    if mode == "key" and THINKING_SCOPE == "task":
+        mode = "brief" if "brief" in THINKING else "on"
+    elif mode == "key":
         results = []
         for message in reversed(turns):               # the newest batch of tool results
             if message["role"] != "tool":
@@ -115,7 +121,7 @@ def thinking_extras(effort: Effort, step: int, turns: list[dict]) -> dict:
         mode = "on" if step == 1 or stuck else "off"
     elif mode == "all" or (mode == "max" and "max" not in THINKING):
         mode = "on"
-    return THINKING.get(mode, {})
+    return mode
 
 
 # ---------------------------------------------------------------- tool registry
@@ -226,9 +232,24 @@ def run_shell(command: str) -> str:
     return f"exit={done.returncode}\n{done.stdout}{done.stderr}"
 
 
-def ask_operator(name: str, args: dict) -> bool:
-    """Replace with a UI prompt or policy engine. The default is to refuse."""
+def no_operator(name: str, args: dict) -> bool:
+    """Nobody is there to ask, so the answer is no."""
     return False
+
+
+ask_operator = no_operator        # replace with a UI prompt or a policy engine
+
+
+def unattended() -> bool:
+    """True when an action that needs approval has nobody to approve it."""
+    return ask_operator is no_operator and not AUTO_APPROVE
+
+
+UNATTENDED = (
+    "Nobody is available to approve commands in this run. run_shell only runs these "
+    f"read-only commands: {', '.join(sorted(READ_ONLY))}. It cannot run programs or change "
+    "anything. To create or change files use write_file and edit_file; write_file creates "
+    "missing folders.")
 
 
 def approved(t: Tool, args: dict) -> bool:
@@ -237,6 +258,16 @@ def approved(t: Tool, args: dict) -> bool:
     if t.name == "run_shell" and is_read_only(str(args.get("command", ""))):
         return True
     return ask_operator(t.name, args)
+
+
+def denial(t: Tool) -> str:
+    """What the model is told. Without an operator, also what to do instead."""
+    if not unattended():
+        return "DENIED: the operator did not approve this action. Continue without it."
+    instead = (" Read-only commands still run. To create or change files use write_file "
+               "or edit_file.") if t.name == "run_shell" else ""
+    return (f"DENIED: nobody is available to approve {t.name} in this run, so do not "
+            f"try it again.{instead}")
 
 
 # ---------------------------------------------------------------- skills
@@ -339,7 +370,7 @@ def execute(call: dict, allowed: dict[str, Tool], seen: Counter) -> str:
                 "Try a different approach or give your final answer.")
     t = allowed[name]
     if not approved(t, args):
-        return "DENIED: the operator did not approve this action. Continue without it."
+        return denial(t)
     try:
         return clip(str(t.fn(**args)), t.max_chars)
     except TypeError as err:
@@ -450,8 +481,10 @@ def run_agent(task: str, system: str, tool_names: list[str], label: str = "main"
               resume: bool = False, effort: str = "medium") -> str:
     """The whole agent: call the model, run the tools it asks for, repeat."""
     level, main = EFFORTS[effort], label == "main"
-    system = f"{system}\n\n{GUIDANCE[level.name]}"
     allowed = {n: REGISTRY[n] for n in tool_names if n in REGISTRY}
+    if "run_shell" in allowed and unattended():
+        system = f"{system}\n\n{UNATTENDED}"      # or it learns one refusal at a time
+    system = f"{system}\n\n{GUIDANCE[level.name]}"
     if level.thinking == "off":
         allowed.pop("think", None)                    # low effort: act, do not deliberate
     if main:
@@ -475,12 +508,13 @@ def run_agent(task: str, system: str, tool_names: list[str], label: str = "main"
     for step in range(1, limit + 1):
         plan = plan_path().read_text() if planning and plan_path().exists() else ""
         messages = build_messages(system, task, summary, turns, plan)
-        extras = THINKING.get("off", {}) if blank else thinking_extras(level, step, turns)
-        reply = call_model(messages, list(allowed.values()), max_tokens, extras)
+        mode = "off" if blank else thinking_mode(level, step, turns)
+        reply = call_model(messages, list(allowed.values()), max_tokens,
+                           THINKING.get(mode, {}))
         text, calls = reply.text, reply.calls
         trace("model", agent=label, step=step, prompt_tokens=reply.prompt_tokens,
-              output_tokens=reply.output_tokens, reasoning_chars=len(reply.thought),
-              tool_calls=[c["name"] for c in calls])
+              output_tokens=reply.output_tokens, thinking=mode,
+              reasoning_chars=len(reply.thought), tool_calls=[c["name"] for c in calls])
         if not calls and not text.strip() and not blank:
             blank = True              # thinking used the whole reply: retry without it
             trace("blank", agent=label, step=step)

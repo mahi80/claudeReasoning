@@ -43,10 +43,11 @@ excerpts = {
     "orchestrator": cut("orchestrator_system"),
     "skills": cut("skills_index", "load_skill"),
     "context": cut("build_messages", "compact"),
-    "guard": cut("inside_workspace", "READ_ONLY", "is_read_only", "approved"),
+    "guard": cut("inside_workspace", "READ_ONLY", "is_read_only", "no_operator", "unattended",
+                 "UNATTENDED", "approved", "denial"),
     "trace": cut("trace"),
     "longtask": cut("update_plan", "checkpoint_file", "save_checkpoint"),
-    "effort": cut("Effort", "EFFORTS", "LADDER", "GUIDANCE", "budgets", "thinking_extras"),
+    "effort": cut("Effort", "EFFORTS", "LADDER", "GUIDANCE", "budgets", "thinking_mode"),
     "scaffolds": cut("think", "VERIFY_PROMPT", "REVIEWER_SYSTEM", "REJECTED", "review",
                      "run_escalating"),
 }
