@@ -94,6 +94,17 @@ evals, the next move is a stronger model, not a higher level.
 
 ## Quick start
 
+Needs Python 3.11 or newer. The tests pass on 3.11 and 3.13; Python 3.10 cannot install
+the pinned FastAPI. If your system Python is older, `uv` adds a newer one beside it:
+
+```bash
+pip install uv && uv python install 3.13
+uv venv --python 3.13 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+```
+
+Otherwise:
+
 ```bash
 pip install -r requirements.txt
 

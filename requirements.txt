@@ -1,4 +1,5 @@
-# Versions the tests were run with (Python 3.13). Newer releases should work; older majors may not.
+# Needs Python 3.11 or newer: FastAPI 0.165 has no release for Python 3.10.
+# Versions the tests were run with (Python 3.11 and 3.13). Newer releases should work; older majors may not.
 openai>=3.60,<4            # harness: OpenAI-compatible client for vLLM
 mcp>=2.3,<3                # harness/mcp_bridge.py (the v2 client API differs from v1)
 fastapi>=0.165             # app/server.py
