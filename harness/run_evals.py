@@ -1,7 +1,7 @@
 """run_evals.py - replay a fixed task set and score it from the workspace and the trace.
 
 Usage: AGENT_WORKSPACE=/tmp/eval-workspace python run_evals.py tasks.jsonl [repeats]
-           [--effort low medium high ...]
+           [--effort low medium high ...] [--shard 0/3]
 Each line of tasks.jsonl is a JSON object with the keys:
   id, task, files (optional: {path: text}), and check (a shell command) or check_py
   (Python source)
@@ -60,9 +60,11 @@ def run_case(case: dict, effort: str = "medium") -> dict:
             "why": "" if passed else why}
 
 
-def main(path: str, repeats: int = 1, effort: str = "medium") -> dict:
+def main(path: str, repeats: int = 1, effort: str = "medium", shard: str = "0/1") -> dict:
     lines = Path(path).read_text().splitlines()
     cases = [json.loads(line) for line in lines if line.strip()]
+    part, parts = map(int, shard.split("/"))      # run every parts-th case, from case `part`
+    cases = cases[part::parts]
     rows = [run_case(c, effort) for c in cases for _ in range(repeats)]
     calls = sum(r["tool_calls"] for r in rows) or 1
     report = {"effort": effort, "runs": len(rows),
@@ -87,8 +89,10 @@ if __name__ == "__main__":
     cli.add_argument("tasks", help="JSON Lines file, one task per line")
     cli.add_argument("repeats", nargs="?", type=int, default=1)
     cli.add_argument("--effort", nargs="+", choices=h.LADDER, default=["medium"])
+    cli.add_argument("--shard", default="0/1", metavar="I/N",
+                     help="run every Nth case starting at case I, to split a set over processes")
     args = cli.parse_args()
-    reports = [main(args.tasks, args.repeats, level) for level in args.effort]
+    reports = [main(args.tasks, args.repeats, level, args.shard) for level in args.effort]
     if len(reports) > 1:                      # the trade-off, one line per level
         print(f"{'effort':8}{'pass rate':>10}{'avg steps':>11}{'avg output tokens':>19}"
               f"{'avg reasoning chars':>21}{'avg seconds':>13}")

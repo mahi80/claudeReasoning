@@ -16,7 +16,8 @@
 #                 put it on a volume to keep the weights across pod stops, at a slower load)
 #   OUT           logs and results (/root/out)
 #   EVALS         task file, relative to the repository (evals/tasks.agent.jsonl)
-#   EFFORTS       effort levels to evaluate, one process each ("low medium high")
+#   EFFORTS       effort levels to evaluate ("low medium high")
+#   SHARDS        processes per level; the cases are split between them (1)
 #   SERVE_EXTRA   extra `vllm serve` flags, for example "--enforce-eager"
 #   READY_TIMEOUT seconds to wait for the server (3600)
 set -u
@@ -146,29 +147,38 @@ smoke() {
 
 evals() {
   cd "$REPO" || return 1
-  for level in ${EFFORTS:-low medium high}; do          # one process per level, side by side
-    AGENT_WORKSPACE=$OUT/eval-workspace-$level AGENT_TRACE=$OUT/evals_$level.trace.jsonl \
-      AGENT_CHECKPOINTS=$OUT/eval-checkpoints-$level \
-      $PY harness/run_evals.py "${EVALS:-evals/tasks.agent.jsonl}" 1 --effort "$level" \
-      > "$OUT/evals_$level.json" 2> "$OUT/evals_$level.err" &
+  shards=${SHARDS:-1}
+  for level in ${EFFORTS:-low medium high}; do          # all of them side by side
+    for shard in $(seq 0 $((shards - 1))); do
+      run=$OUT/evals_${level}_$shard
+      AGENT_WORKSPACE=$run-eval-workspace AGENT_TRACE=$run.trace.jsonl \
+        AGENT_CHECKPOINTS=$run-checkpoints \
+        $PY harness/run_evals.py "${EVALS:-evals/tasks.agent.jsonl}" 1 --effort "$level" \
+        --shard "$shard/$shards" > "$run.json" 2> "$run.err" &
+    done
   done
   wait
   date -u +"evals finished %FT%TZ" >> "$OUT/system.log"
   $PY - "$OUT" ${EFFORTS:-low medium high} <<'EOF'
-import json, sys
+import glob, json, sys
 out, levels = sys.argv[1], sys.argv[2:]
 print(f"{'effort':8}{'passed':>8}{'avg steps':>11}{'avg output tokens':>19}"
       f"{'avg reasoning chars':>21}{'avg seconds':>13}{'tool failures':>15}")
 for level in levels:
-    try:
-        r = json.load(open(f"{out}/evals_{level}.json"))
-    except (OSError, ValueError):
-        print(f"{level:8}  no result: see {out}/evals_{level}.err")
+    rows = []
+    for path in sorted(glob.glob(f"{out}/evals_{level}_*.json")):
+        try:
+            rows += json.load(open(path))["rows"]
+        except (OSError, ValueError):
+            print(f"{level:8}  no result in {path}: see its .err file")
+    if not rows:
         continue
-    passed = sum(row["passed"] for row in r["rows"])
-    print(f"{level:8}{passed:>5}/{r['runs']:<2}{r['avg_steps']:>11}{r['avg_output_tokens']:>19}"
-          f"{r['avg_reasoning_chars']:>21}{r['avg_seconds']:>13}{r['tool_failure_rate']:>15}")
-    for row in r["rows"]:
+    n, calls = len(rows), sum(r["tool_calls"] for r in rows) or 1
+    mean = lambda key: sum(r[key] for r in rows) / n
+    print(f"{level:8}{sum(r['passed'] for r in rows):>5}/{n:<2}{mean('steps'):>11.1f}"
+          f"{mean('output_tokens'):>19.0f}{mean('reasoning_chars'):>21.0f}{mean('seconds'):>13.1f}"
+          f"{sum(r['tool_failures'] for r in rows) / calls:>15.3f}")
+    for row in rows:
         if not row["passed"]:
             print(f"    failed {row['id']}: {' '.join(row['why'].split())[-110:]}")
 EOF
