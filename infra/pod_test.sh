@@ -146,8 +146,8 @@ smoke() {
 evals() {
   cd "$REPO" || return 1
   for level in ${EFFORTS:-low medium high}; do          # one process per level, side by side
-    AGENT_WORKSPACE=/root/eval-workspace-$level AGENT_TRACE=$OUT/evals_$level.trace.jsonl \
-      AGENT_CHECKPOINTS=/root/eval-checkpoints-$level \
+    AGENT_WORKSPACE=$OUT/eval-workspace-$level AGENT_TRACE=$OUT/evals_$level.trace.jsonl \
+      AGENT_CHECKPOINTS=$OUT/eval-checkpoints-$level \
       $PY harness/run_evals.py "${EVALS:-evals/tasks.agent.jsonl}" 1 --effort "$level" \
       > "$OUT/evals_$level.json" 2> "$OUT/evals_$level.err" &
   done
