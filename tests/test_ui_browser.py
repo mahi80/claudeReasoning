@@ -5,6 +5,7 @@ Writes screenshots to docs/ when SCREENSHOT_DIR is set.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -106,11 +107,18 @@ with sync_playwright() as p:
     check("two user bubbles and two agent bubbles",
           page.locator(".msg.user").count() == 2 and page.locator(".msg.agent").count() == 2)
 
-    # third task: a longer job, so the agent's checklist shows up and gets ticked off
+    # third task: a longer job at high effort, so the checklist shows up and gets ticked
+    page.select_option("select[name=effort]", "high")
     page.fill("input[name=message]", "Write the weekly report")
     page.click("form button")
     third = page.locator(".msg.agent").nth(2)
     third.locator(".answer", has_text="plan seen").wait_for(timeout=30000)
+    levels = [e["effort"] for e in map(json.loads, server.h.TRACE_FILE.read_text().splitlines())
+              if e["event"] == "run"]
+    check("effort picked in the browser reaches the harness, and the picker keeps it",
+          levels == ["medium", "medium", "high"]
+          and page.input_value("select[name=effort]") == "high"
+          and page.input_value("input[name=message]") == "", str(levels))
     plan = third.locator(".plan").inner_text()
     check("plan checklist shown and ticked off in the chat",
           "[x] write the file" in plan and "[ ] report back" in plan, plan)

@@ -9,3 +9,6 @@ python3 docs/build/excerpts.py > /dev/null  # docs/build/out/excerpts.json (cut 
 python3 docs/build/figures.py               # docs/img/fig_loop.png, fig_deploy.png
 python3 docs/build/ui_figure.py             # docs/img/ui-flow.png, if new screenshots exist
 node docs/build/build_doc.js               # docs/agent-harness-open-models-runpod.docx
+# Word can refuse a file whose ZIP has folder entries when it is opened through a cloud
+# co-editing service, so drop them.
+zip -d docs/agent-harness-open-models-runpod.docx '*/' > /dev/null 2>&1 || true

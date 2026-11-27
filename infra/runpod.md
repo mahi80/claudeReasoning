@@ -123,6 +123,77 @@ The last command fails unless the reply contains a parsed tool call whose argume
 match a strict schema. A tool call that arrives as plain text means the parser or chat
 template is wrong for that model.
 
+## Thinking switches for the effort levels
+
+The harness turns the model's own thinking on and off per call, according to the effort
+level. Each model takes different request fields, so they are configuration:
+`LLM_THINKING` is a JSON map with `off`, `on` and optionally `max`. Set
+`LLM_CONTEXT_WINDOW` to the `--max-model-len` you serve.
+
+These fields come from the vLLM documentation, the recipes and the vLLM source at commit
+`c58be70` (27 November 2026). None was run against a live model for this repository.
+With `LLM_THINKING` set, `harness/smoke_test.py` sends one request per fragment and fails
+if `on` returns no reasoning or `off` returns some.
+
+### Gemma 4
+
+```bash
+export LLM_THINKING='{"off": {"chat_template_kwargs": {"enable_thinking": false}},
+                      "on":  {"chat_template_kwargs": {"enable_thinking": true}}}'
+export LLM_KEEP_REASONING=1
+export LLM_CONTEXT_WINDOW=32768
+```
+
+Thinking is off unless switched on. Google says thoughts must stay in place between
+function calls, and vLLM's Gemma 4 template renders returned reasoning for the messages
+after the last user message, hence `LLM_KEEP_REASONING=1`. The switch is a token at the
+top of the system turn, so each flip defeats the server's prefix cache for that call.
+Google describes thinking as a conversation-level setting, so the per-step pattern at
+medium effort is off the documented path: if your evals show trouble at medium, change
+its `thinking` value in `EFFORTS` to `all` or `off`.
+
+### Mistral Small 4
+
+```bash
+export LLM_THINKING='{"off": {"reasoning_effort": "none"},
+                      "on":  {"reasoning_effort": "high", "temperature": 0.7}}'
+export LLM_CONTEXT_WINDOW=131072
+```
+
+Only two settings exist, and they are made to be switched per request. The recipe asks
+for temperature 0.7 with reasoning; a fragment can carry it. Leave `LLM_KEEP_REASONING`
+unset: nothing in vLLM's Mistral-specific code reads returned reasoning.
+
+### DeepSeek V4-Flash
+
+```bash
+export LLM_THINKING='{"off": {"chat_template_kwargs": {"thinking": false}},
+  "on":  {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "high"}},
+  "max": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "max"}}}'
+export LLM_KEEP_REASONING=1
+export LLM_TEMPERATURE=1.0
+export LLM_EXTRA_BODY='{"top_p": 0.95}'
+```
+
+vLLM's DeepSeek V4 tokenizer turns thinking on when no switch is sent, so the `off`
+fragment matters. With tools in the request the encoder keeps reasoning for the whole
+conversation, provided the client sends it back. The recipe asks for `--max-model-len`
+of at least 393216 in max mode; set `LLM_CONTEXT_WINDOW` to whatever you serve. The 0731
+release also has a `low` level, which you can use for `on` to make high effort cheaper.
+
+DeepSeek V4.1-Flash (September 2026) is newer and takes a numeric reasoning budget. It
+is not sized in this repository; read its vLLM recipe before choosing a DeepSeek tier.
+
+### Room for thinking
+
+Thinking counts against the reply budget (4,096 tokens at low and medium effort, 8,192
+at high and xhigh, 16,384 at max), and prompt plus reply must fit `--max-model-len`. The
+harness lowers its prompt budget to fit the window you declare. With 32,768 it keeps
+24,000 prompt tokens at low and medium, 20,480 at high and xhigh, and 12,288 at max, so
+serve a larger window (65536 if the KV cache can hold it) for regular use of xhigh or
+max. vLLM's `thinking_token_budget` request field caps reasoning tokens per call; add it
+to the `on` fragment if replies come back empty.
+
 ## Reaching the model server
 
 | Pattern | How | Watch out |

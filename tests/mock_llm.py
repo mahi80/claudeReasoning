@@ -31,6 +31,10 @@ def validate(body: dict) -> None:
         if role in ("user", "assistant") and pending:
             raise ValueError("turn started before all tool results were returned")
         if role == "assistant":
+            if not m.get("content") and not m.get("tool_calls"):
+                raise ValueError("assistant message with neither content nor tool calls")
+            if "reasoning" in m and not isinstance(m["reasoning"], str):
+                raise ValueError("returned reasoning must be a string")
             for tc in m.get("tool_calls") or []:
                 if not tc.get("id"):
                     raise ValueError("tool call without id")
@@ -46,6 +50,9 @@ def validate(body: dict) -> None:
         raise ValueError("assistant tool calls left without results")
     if prev == "assistant":
         raise ValueError("conversation must not end on an assistant message")
+    if "max_tokens" in body and (not isinstance(body["max_tokens"], int)
+                                 or body["max_tokens"] < 1):
+        raise ValueError("max_tokens must be a positive integer")
     for t in body.get("tools") or []:
         fn = t["function"]
         if not fn.get("name") or not fn.get("description"):
@@ -56,6 +63,16 @@ def validate(body: dict) -> None:
 
 def last_tool_results(msgs: list[dict], n: int = 1) -> list[str]:
     return [m["content"] for m in msgs if m["role"] == "tool"][-n:]
+
+
+def thinking_on(body: dict) -> bool:
+    """The tests switch thinking the way Mistral Small 4 does: reasoning_effort."""
+    return body.get("reasoning_effort") == "high"
+
+
+def nudged(msgs: list[dict], opening: str) -> bool:
+    """Did the harness add a follow-up user message that starts with this text?"""
+    return any(m["role"] == "user" and m["content"].startswith(opening) for m in msgs[2:])
 
 
 def policy(body: dict) -> dict:
@@ -75,7 +92,49 @@ def policy(body: dict) -> dict:
         COUNTERS[task] += 1
     last = last_tool_results(msgs)
     j = json.dumps
+    acted = sum(1 for m in msgs if m["role"] == "assistant" and m.get("tool_calls"))
+    reviewer = msgs[0]["content"].startswith("You are an independent reviewer")
+    if reviewer and scenario != "review":
+        return {"text": "PASS"}
 
+    if scenario == "verify":          # high effort and above: one self-check before finishing
+        if not acted:
+            return {"calls": [("write_file", j({"path": "v.txt", "content": "v1"}))]}
+        if not nudged(msgs, "Before this goes to the user"):
+            return {"text": "first answer"}
+        if "confirm" in task:
+            return {"text": "CONFIRMED"}
+        if msgs[-1]["role"] == "user":
+            return {"calls": [("read_file", j({"path": "v.txt"}))]}
+        return {"text": f"checked answer: {last[0]}"}
+    if scenario == "review":          # xhigh and max: a fresh-context reviewer can reject
+        if reviewer:
+            if "unclear" in task:
+                return {"text": "Looks fine to me."}
+            if not last:
+                return {"calls": [("read_file", j({"path": "r.txt"}))]}
+            return {"text": "PASS" if last[0] == "right" else "FAIL\nr.txt holds the wrong text"}
+        rejected = nudged(msgs, "An independent reviewer rejected")
+        if not acted:
+            return {"calls": [("write_file", j({"path": "r.txt", "content": "wrong"}))]}
+        if rejected and "stubborn" in task:
+            return {"text": "CONFIRMED"}
+        if rejected and acted == 1:
+            return {"calls": [("write_file", j({"path": "r.txt", "content": "right"}))]}
+        return {"text": "answer two" if rejected else "answer one"}
+    if scenario == "fanout":          # three workers asked for; the level decides how many run
+        if not acted:
+            prefix = re.search(r"prefix=(\w+)", task).group(1)
+            return {"calls": [
+                ("spawn_agent", j({"task": f"[scenario:sub] write {prefix}{n}.txt"}))
+                for n in (1, 2, 3)]}
+        return {"text": " | ".join(last_tool_results(msgs, 3))}
+    if scenario == "blank":           # thinking used the whole reply: nothing came back
+        return {"text": "" if thinking_on(body) else "answer after retry"}
+    if scenario == "think":
+        if not acted:
+            return {"calls": [("think", j({"thought": "The file must exist before I read it."}))]}
+        return {"text": f"think said: {last[0]}"}
     if scenario == "basic":
         if i == 0:
             return {"calls": [("write_file", j({"path": "notes/a.txt", "content": "hello"}))]}
@@ -192,6 +251,8 @@ class Handler(BaseHTTPRequestHandler):
             message = {"role": "assistant", "content": plan.get("text") or None}
             if calls:
                 message["tool_calls"] = calls
+            if thinking_on(body):
+                message["reasoning"] = "Weighing the next step. Decided."
             return self._send_json(200, {
                 "id": "chatcmpl-mock", "object": "chat.completion", "created": int(time.time()),
                 "model": body["model"],
@@ -217,6 +278,9 @@ class Handler(BaseHTTPRequestHandler):
             return {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
 
         emit(chunk({"role": "assistant", "content": ""}))
+        if thinking_on(body):                           # reasoning arrives in its own field
+            emit(chunk({"reasoning": "Weighing the next step. "}))
+            emit(chunk({"reasoning": "Decided."}))
         text = plan.get("text", "")
         for k in range(0, len(text), 12):
             emit(chunk({"content": text[k:k + 12]}))

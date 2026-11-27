@@ -20,7 +20,13 @@ os.environ.update(
     LLM_BASE_URL=f"http://127.0.0.1:{port}/v1", LLM_API_KEY="test-key", LLM_MODEL="mock",
     AGENT_WORKSPACE=str(tmp / "workspace"), AGENT_SKILLS=str(tmp / "skills"),
     AGENT_TRACE=str(tmp / "trace.jsonl"), AGENT_CHECKPOINTS=str(tmp / "checkpoints"),
-    AGENT_MAX_STEPS="15", AGENT_CONTEXT_BUDGET="3000")
+    AGENT_MAX_STEPS="15", AGENT_CONTEXT_BUDGET="3000",
+    # thinking is switched the way Mistral Small 4 does it; a fragment may carry any field
+    LLM_THINKING=json.dumps({
+        "off": {"reasoning_effort": "none"},
+        "on": {"reasoning_effort": "high", "temperature": 0.7},
+        "max": {"reasoning_effort": "high", "chat_template_kwargs": {"depth": "max"}}}),
+    LLM_EXTRA_BODY=json.dumps({"chat_template_kwargs": {"custom": 1}}))
 
 import mini_harness as h  # noqa: E402
 
@@ -142,6 +148,180 @@ check("resume continues from the checkpoint",
       and (h.WORKSPACE / "l19.txt").exists(), f"{first} / {second} / {len(resumed)}")
 check("resume event traced", len(events("resume")) == 1)
 
+# ---------------------------------------------------------------- effort levels
+def run_at(effort: str, task: str) -> tuple[str, list[dict], list[dict]]:
+    """Run one task at one level; return the answer, its requests and its trace events."""
+    r0, t0 = len(mock_llm.REQUESTS), len(h.TRACE_FILE.read_text().splitlines())
+    answer = h.run_agent(task, SYSTEM, ALL, effort=effort)
+    lines = h.TRACE_FILE.read_text().splitlines()[t0:]
+    return answer, mock_llm.REQUESTS[r0:], [json.loads(line) for line in lines]
+
+
+def thinking(requests: list[dict]) -> list[bool]:
+    return [r.get("reasoning_effort") == "high" for r in requests]
+
+
+def offered(request: dict) -> set[str]:
+    return {t["function"]["name"] for t in request.get("tools", [])}
+
+
+def kinds(trace_events: list[dict], kind: str) -> list[dict]:
+    return [e for e in trace_events if e["event"] == kind]
+
+
+# low: no thinking, no think tool, no delegation, the level's line in the system prompt
+out, reqs, evs = run_at("low", "[scenario:basic] low effort")
+check("low: thinking off on every call", out == "DONE: hello" and thinking(reqs) == [False] * 3,
+      f"{out} {thinking(reqs)}")
+check("low: think and spawn_agent are not offered",
+      not {"think", "spawn_agent"} & offered(reqs[0]) and "update_plan" in offered(reqs[0]))
+check("effort guidance is appended to the system prompt",
+      reqs[0]["messages"][0]["content"].endswith(h.GUIDANCE["low"])
+      and reqs[0]["messages"][0]["content"].startswith(SYSTEM))
+
+# medium: thinking on the first step and on the step after a failed tool call
+out, reqs, evs = run_at("medium", "[scenario:basic] medium effort")
+check("medium: thinking on the first step only", thinking(reqs) == [True, False, False],
+      str(thinking(reqs)))
+check("reasoning is read from its own field and traced",
+      [e["reasoning_chars"] > 0 for e in kinds(evs, "model")] == [True, False, False]
+      and all(e["output_tokens"] == 10 for e in kinds(evs, "model")))
+out, reqs, evs = run_at("medium", "[scenario:badjson] think after the error")
+check("medium: thinking returns after a failed tool call",
+      out == "recovered" and thinking(reqs) == [True, True, False], str(thinking(reqs)))
+check("a thinking fragment can carry other request fields",
+      [r["temperature"] for r in reqs] == [0.7, 0.7, 0.2], str([r["temperature"] for r in reqs]))
+
+# high: thinking on every call, a larger reply budget, and one self-check
+out, reqs, evs = run_at("high", "[scenario:verify] check before answering")
+check("high: self-check runs before the answer is accepted",
+      out == "checked answer: v1" and len(reqs) == 4 and all(thinking(reqs)), f"{out} {len(reqs)}")
+out, reqs, evs = run_at("high", "[scenario:verify] confirm it")
+check("high: a confirmed self-check returns the first answer in full",
+      out == "first answer" and len(reqs) == 3, out)
+out, reqs, evs = run_at("medium", "[scenario:verify] no check at medium")
+check("medium: no self-check", out == "first answer" and len(reqs) == 2, out)
+sizes = {}
+for level in h.LADDER:
+    _, reqs, _ = run_at(level, f"[scenario:think] reply size at {level}")
+    sizes[level] = reqs[0]["max_tokens"]
+check("reply budget grows with the level",
+      sizes == {"low": 4096, "medium": 4096, "high": 8192, "xhigh": 8192, "max": 16384},
+      str(sizes))
+check("max uses its own thinking fragment, merged with LLM_EXTRA_BODY",
+      reqs[0]["chat_template_kwargs"] == {"custom": 1, "depth": "max"},
+      str(reqs[0].get("chat_template_kwargs")))
+
+# the think tool is a no-op the model can call between other tools
+out, reqs, evs = run_at("medium", "[scenario:think] reason between calls")
+check("think tool", out == "think said: noted" and "think" in offered(reqs[0]), out)
+
+# xhigh: an independent reviewer with a fresh context can send the work back once
+out, reqs, evs = run_at("xhigh", "[scenario:review] reviewed once")
+reviewer = [r for r in reqs if r["messages"][0]["content"].startswith("You are an independent")]
+check("xhigh: a failed review sends the work back",
+      out == "answer two" and (h.WORKSPACE / "r.txt").read_text() == "right"
+      and [e["passed"] for e in kinds(evs, "review")] == [False], out)
+check("reviewer has a fresh context and read-only tools",
+      len(reviewer) == 2 and len(reviewer[0]["messages"]) == 2
+      and offered(reviewer[0]) == {"read_file", "list_dir", "think"}
+      and "answer one" in reviewer[0]["messages"][1]["content"])
+out, reqs, evs = run_at("max", "[scenario:review] reviewed twice")
+check("max: second review passes after the fix",
+      out == "answer two" and [e["passed"] for e in kinds(evs, "review")] == [False, True], out)
+out, reqs, evs = run_at("high", "[scenario:review] no reviewer at high")
+check("high: no reviewer", out == "answer one" and not kinds(evs, "review"), out)
+out, reqs, evs = run_at("xhigh", "[scenario:review] stubborn agent")
+check("an agent that only confirms after a rejection keeps its full answer",
+      out == "answer one" and [e["passed"] for e in kinds(evs, "review")] == [False], out)
+out, reqs, evs = run_at("xhigh", "[scenario:review] unclear verdict")
+check("a verdict that is not FAIL is accepted",
+      out == "answer one" and [e["passed"] for e in kinds(evs, "review")] == [True], out)
+
+# worker budget: medium allows two workers, high allows four, low has no spawn tool
+out, reqs, evs = run_at("medium", "[scenario:fanout] prefix=m")
+made = sorted(f.name for f in h.WORKSPACE.glob("m?.txt"))
+check("medium: third worker refused",
+      out.count("ERROR: this effort level allows 2 worker agents") == 1
+      and out.count("written") == 2 and len(made) == 2, f"{out} {made}")
+out, reqs, evs = run_at("high", "[scenario:fanout] prefix=h")
+check("high: three workers run", out.count("written") == 3 and "ERROR" not in out
+      and len(list(h.WORKSPACE.glob("h?.txt"))) == 3, out)
+
+# a reply that is all thinking and no answer is retried once with thinking off
+out, reqs, evs = run_at("medium", "[scenario:blank] empty reply")
+check("blank reply retried without thinking",
+      out == "answer after retry" and thinking(reqs) == [True, False]
+      and len(kinds(evs, "blank")) == 1, f"{out} {thinking(reqs)}")
+
+# returned reasoning: off by default, on with LLM_KEEP_REASONING=1
+h.KEEP_REASONING = True
+out, reqs, evs = run_at("high", "[scenario:basic] keep the thoughts")
+h.KEEP_REASONING = False
+kept = [m.get("reasoning") for m in reqs[-1]["messages"] if m.get("tool_calls")]
+check("reasoning is sent back between tool calls when enabled",
+      kept == ["Weighing the next step. Decided."] * 2, str(kept))
+out, reqs, evs = run_at("high", "[scenario:basic] drop the thoughts")
+check("reasoning is not sent back by default",
+      all("reasoning" not in m for r in reqs for m in r["messages"]))
+
+# without AGENT_MAX_STEPS the level sets the step limit
+h.MAX_STEPS = 0
+out, reqs, evs = run_at("low", "[scenario:steps] preset limit")
+h.MAX_STEPS = 15
+check("step limit comes from the level", out.startswith("Stopped at the 8-step limit"), out)
+
+# escalation: a stalled run resumes one level up; a rejected answer is retried one level up
+r0, t0 = len(mock_llm.REQUESTS), len(h.TRACE_FILE.read_text().splitlines())
+out = h.run_escalating("[scenario:long] escalate from low", SYSTEM, ALL, start="low")
+evs = [json.loads(line) for line in h.TRACE_FILE.read_text().splitlines()[t0:]]
+check("escalation resumes a stalled run one level up",
+      out == "all 20 written" and [e["effort"] for e in kinds(evs, "run")] == ["low", "medium"]
+      and len(kinds(evs, "escalate")) == 1 and len(kinds(evs, "resume")) == 1
+      and len(mock_llm.REQUESTS) - r0 == 21, f"{out} {len(mock_llm.REQUESTS) - r0}")
+t0 = len(h.TRACE_FILE.read_text().splitlines())
+out = h.run_escalating("[scenario:think] escalate on a failed check", SYSTEM, ALL, start="low",
+                       accept=lambda answer: answer == "think said: noted")
+evs = [json.loads(line) for line in h.TRACE_FILE.read_text().splitlines()[t0:]]
+check("escalation retries a rejected answer one level up",
+      out == "think said: noted" and [e["effort"] for e in kinds(evs, "run")] == ["low", "medium"],
+      out)
+
+# the reply budget and the prompt budget share the server's context window
+keep = (h.CONTEXT_WINDOW, h.CONTEXT_BUDGET)
+h.CONTEXT_WINDOW, h.CONTEXT_BUDGET = 32768, 24000
+small = {name: h.budgets(level) for name, level in h.EFFORTS.items()}
+h.CONTEXT_WINDOW = 65536
+large = h.budgets(h.EFFORTS["max"])
+h.CONTEXT_WINDOW, h.CONTEXT_BUDGET = keep
+check("budgets fit the context window",
+      small == {"low": (4096, 24000), "medium": (4096, 24000), "high": (8192, 20480),
+                "xhigh": (8192, 20480), "max": (16384, 12288)} and large == (16384, 24000),
+      f"{small} {large}")
+
+
+# compaction never leaves a follow-up user message or a tool result at the front
+def pair(n: int, calls: int = 1) -> list[dict]:
+    ids = [f"k{n}x{c}" for c in range(calls)]
+    return [{"role": "assistant", "content": None, "tool_calls": [
+        {"id": i, "type": "function", "function": {"name": "list_dir", "arguments": "{}"}}
+        for i in ids]}] + [{"role": "tool", "tool_call_id": i, "content": "ok"} for i in ids]
+
+
+history = (pair(0) + pair(1) + pair(2) + pair(3)
+           + [{"role": "assistant", "content": "draft"},
+              {"role": "user", "content": h.VERIFY_PROMPT}]
+           + pair(4) + pair(5) + pair(6, calls=2))
+recent, summary = h.compact(history, "")
+try:
+    mock_llm.validate({"messages": h.build_messages("s", "t", summary, recent)})
+    valid = True
+except ValueError as err:
+    valid = str(err)
+check("compaction keeps a valid message order around follow-up prompts",
+      len(history) == 17 and history[-h.KEEP_RECENT]["role"] == "user"
+      and recent[0]["role"] == "assistant" and len(recent) == 7 and valid is True, str(valid))
+
 # 13. MCP tools via the bridge
 from mcp import StdioServerParameters  # noqa: E402
 import mcp_bridge  # noqa: E402
@@ -160,9 +340,21 @@ import subprocess  # noqa: E402
 
 smoke = subprocess.run([sys.executable, str(ROOT / "harness" / "smoke_test.py")],
                        capture_output=True, text=True, timeout=60,
-                       env={**os.environ, "SMOKE_PROMPT": "[scenario:basic] smoke"})
+                       env={**os.environ, "SMOKE_PROMPT": "[scenario:basic] smoke",
+                            "SMOKE_THINKING_PROMPT": "[scenario:blank] thinking probe"})
 check("smoke_test.py", smoke.returncode == 0 and smoke.stdout.startswith("OK write_file"),
       smoke.stdout + smoke.stderr)
+check("smoke test proves each thinking fragment switches the model",
+      "thinking off: 0 reasoning characters" in smoke.stdout
+      and "thinking on: 32 reasoning characters" in smoke.stdout
+      and "thinking max: 32 reasoning characters" in smoke.stdout, smoke.stdout + smoke.stderr)
+broken = subprocess.run(
+    [sys.executable, str(ROOT / "harness" / "smoke_test.py")], capture_output=True, text=True,
+    timeout=60, env={**os.environ, "SMOKE_PROMPT": "[scenario:basic] smoke again",
+                     "SMOKE_THINKING_PROMPT": "[scenario:blank] dead switch",
+                     "LLM_THINKING": json.dumps({"on": {"enable_thinking": True}})})
+check("smoke test fails when a fragment does nothing",
+      broken.returncode != 0 and "did not switch thinking" in broken.stderr, broken.stderr[-200:])
 
 # 14. the mock (acting as a strict chat template) rejected nothing
 check("no malformed requests sent", not mock_llm.ERRORS, "; ".join(mock_llm.ERRORS))

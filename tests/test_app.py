@@ -57,8 +57,9 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(("PASS " if ok else "FAIL ") + name + (f"  [{detail}]" if detail and not ok else ""))
 
 
-def post_chat(message: str) -> tuple[str, str]:
-    reply = httpx.post(f"{BASE}/chat", data={"message": message}, timeout=10)
+def post_chat(message: str, effort: str | None = None) -> tuple[str, str]:
+    form = {"message": message} | ({"effort": effort} if effort else {})
+    reply = httpx.post(f"{BASE}/chat", data=form, timeout=10)
     assert reply.status_code == 200, reply.text
     return re.search(r'sse-connect="/runs/(\w+)/events"', reply.text).group(1), reply.text
 
@@ -147,6 +148,32 @@ run_id, fragment = post_chat("<script>alert(1)</script> [scenario:unknown] ui xs
 xss = read_events(run_id)
 check("user and model text escaped", "<script>" not in fragment and "&lt;script&gt;" in fragment
       and "&#x27;delete_everything&#x27;" in texts(xss, "answer")[0])
+
+# effort picker: the chosen level reaches the harness; the default is medium
+def run_events(run_id: str) -> list[dict]:
+    lines = server.h.TRACE_FILE.read_text().splitlines()
+    return [e for e in map(json.loads, lines) if e["run"] == run_id and e["event"] == "run"]
+
+
+options = re.findall(r'<option value="(\w+)"( selected)?>', page)
+check("effort picker lists five levels, medium preselected",
+      options == [("low", ""), ("medium", " selected"), ("high", ""), ("xhigh", ""),
+                  ("max", "")], str(options))
+run_id, _ = post_chat("[scenario:basic] ui low effort", "low")
+low = read_events(run_id)
+check("chosen effort reaches the harness",
+      texts(low, "answer") == ["DONE: hello"] and "Working at low effort" in texts(low, "status")
+      and [e["effort"] for e in run_events(run_id)] == ["low"]
+      and [e["effort"] for e in run_events(ids[0])] == ["medium"], str(run_events(run_id)))
+check("unknown effort level is rejected",
+      httpx.post(f"{BASE}/chat", data={"message": "x", "effort": "turbo"}).status_code == 422)
+run_id, _ = post_chat("[scenario:review] ui reviewed", "xhigh")
+reviewed = read_events(run_id)
+check("review progress shown in the chat",
+      texts(reviewed, "answer") == ["answer two"]
+      and "Reviewer step 1: read_file" in texts(reviewed, "status")
+      and "Independent review: changes requested" in texts(reviewed, "status"),
+      " | ".join(texts(reviewed, "status")))
 
 # 6. unknown run and replay of a finished run
 check("unknown run is 404", httpx.get(f"{BASE}/runs/nope/events").status_code == 404

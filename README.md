@@ -5,21 +5,22 @@ open-weight models (Gemma 4, Mistral Small 4, DeepSeek V4-Flash) served by vLLM 
 Runpod on-demand Pods. It comes with a chat UI, on-demand GPU start and stop, and a
 design document that explains every part.
 
-> **Status.** All 56 automated checks pass, and all of them run against mock endpoints
+> **Status.** All 93 automated checks pass, and all of them run against mock endpoints
 > (a mock model server and a mock Runpod API). Nothing here has been run on a live GPU
-> or against the real Runpod API yet. The serve commands come from the vLLM recipes.
+> or against the real Runpod API yet. The serve commands and the thinking switches come
+> from the vLLM recipes, documentation and source.
 
 ## What is in here
 
 | Path | What it holds |
 |---|---|
 | [`docs/agent-harness-open-models-runpod.docx`](docs/agent-harness-open-models-runpod.docx) | The design document: how the reference harness works, architecture, model options, Runpod sizing and cost, implementation guide, reliability, security, delivery plan, sources |
-| [`harness/mini_harness.py`](harness/mini_harness.py) | The whole agent in about 420 lines: loop, tools, subagents, skills, plan, checkpoints, compaction, trace |
+| [`harness/mini_harness.py`](harness/mini_harness.py) | The whole agent in about 620 lines: loop, tools, subagents, skills, plan, checkpoints, compaction, effort levels, trace |
 | [`harness/mcp_bridge.py`](harness/mcp_bridge.py) | MCP servers as harness tools (mcp SDK 2.x) |
 | [`harness/pod_manager.py`](harness/pod_manager.py) | Start the Runpod pod on demand, wait for `/health`, stop it when idle |
-| [`harness/run_evals.py`](harness/run_evals.py) | Replay a task file and report pass rate, steps, tool failures |
-| [`harness/smoke_test.py`](harness/smoke_test.py) | One request that proves an endpoint returns parsed tool calls |
-| [`app/server.py`](app/server.py) | HTMX chat UI on FastAPI: live progress, plan checklist, approvals |
+| [`harness/run_evals.py`](harness/run_evals.py) | Replay a task file and report pass rate, steps, tokens and tool failures, one line per effort level |
+| [`harness/smoke_test.py`](harness/smoke_test.py) | Proves an endpoint returns parsed tool calls and that the thinking switch works |
+| [`app/server.py`](app/server.py) | HTMX chat UI on FastAPI: live progress, plan checklist, approvals, effort picker |
 | [`infra/runpod.md`](infra/runpod.md) | Pod template, serve commands per model, prices and monthly cost |
 | [`tests/`](tests) | Mock model endpoint, mock Runpod API, four test scripts |
 
@@ -48,15 +49,58 @@ resume.
 **Open models call tools less reliably**, so the harness feeds every failure back as
 text the model can act on: bad JSON, unknown tools, repeated calls, denied actions.
 
+## Effort levels
+
+Claude takes an effort level with each request (low, medium, high, xhigh, max) and was
+trained to follow it. An open model was not, so the harness builds the same dial from
+parts it controls. Pick a level per task with `--effort`, the `effort=` argument of
+`run_agent`, or the picker in the chat UI. Medium is the default.
+
+| Level | Model's own thinking | Steps | Reply tokens | Workers | Self-check | Reviews |
+|---|---|---|---|---|---|---|
+| `low` | Off, and no think tool | 8 | 4,096 | None | No | 0 |
+| `medium` | First step, and the step after a failed tool call | 20 | 4,096 | 2 | No | 0 |
+| `high` | Every call | 40 | 8,192 | 4 | Yes | 0 |
+| `xhigh` | Every call | 80 | 8,192 | 6 | Yes | 1 |
+| `max` | Every call, in the model's deepest mode | 150 | 16,384 | 8 | Yes | 2 |
+
+What sits behind the columns, all in `harness/mini_harness.py`:
+
+- **The model's own thinking** is switched per call through `LLM_THINKING`, a small JSON
+  map of request fields for `off`, `on` and `max`. The fields differ per model;
+  [`infra/runpod.md`](infra/runpod.md) has them for Gemma 4, Mistral Small 4 and
+  DeepSeek V4-Flash.
+- **One line of guidance per level** is added to every system prompt (`GUIDANCE`).
+- **A `think` tool** gives the model a place to reason between tool calls.
+- **Self-check** (high and above): before an answer is accepted, the model checks it
+  against the task and replies CONFIRMED or fixes it.
+- **Independent review** (xhigh, max): a second agent with a fresh context and
+  read-only tools replies PASS or FAIL; a FAIL sends the work back with the reasons.
+- **Escalation** (`--escalate`, `run_escalating`): start cheap and climb a level when a
+  run stalls or a check you supply rejects the answer.
+
+Choose a level from data, not by feel:
+
+```bash
+AGENT_WORKSPACE=/tmp/eval-workspace python harness/run_evals.py evals/tasks.jsonl 3 \
+    --effort low medium high
+```
+
+The last lines of the output give pass rate, steps and output tokens per level.
+
+None of this adds reasoning ability the model does not have. It helps a model use what
+it has: fewer slips, fewer early exits, a second look. If high effort still fails your
+evals, the next move is a stronger model, not a higher level.
+
 ## Quick start
 
 ```bash
 pip install -r requirements.txt
 
-python tests/test_harness.py      # 27 checks: the loop against a mock model endpoint
-python tests/test_evals.py        # the eval runner
-python tests/test_app.py          # 18 checks: chat UI, pod manager, approvals
-python tests/test_ui_browser.py   # 10 checks in headless Chrome (needs playwright)
+python tests/test_harness.py      # 58 checks: the loop and effort levels against a mock model
+python tests/test_evals.py        # 2 checks: the eval runner and the effort comparison
+python tests/test_app.py          # 22 checks: chat UI, pod manager, approvals, effort picker
+python tests/test_ui_browser.py   # 11 checks in headless Chrome (needs playwright)
 ```
 
 ### Run it against your own model
@@ -70,13 +114,23 @@ export LLM_BASE_URL=https://<POD_ID>-8000.proxy.runpod.net/v1
 export LLM_API_KEY=<your vLLM key>
 export LLM_MODEL=agent-model
 
+# Gemma 4: how to switch thinking, and the server's --max-model-len
+export LLM_THINKING='{"off": {"chat_template_kwargs": {"enable_thinking": false}},
+                      "on":  {"chat_template_kwargs": {"enable_thinking": true}}}'
+export LLM_KEEP_REASONING=1
+export LLM_CONTEXT_WINDOW=32768
+
 python harness/smoke_test.py
 python harness/mini_harness.py "Create notes/todo.md with three items and read it back"
+python harness/mini_harness.py --effort high "Compare the two files in notes/ and list the differences"
 python harness/mini_harness.py --resume "Create notes/todo.md with three items and read it back"
 ```
 
-`--resume` continues the same task from its last checkpoint, for example after the step
-limit or a stopped pod.
+`--effort` takes `low`, `medium` (the default), `high`, `xhigh` or `max`. `--resume`
+continues the same task from its last checkpoint, for example after the step limit or a
+stopped pod. `--escalate` starts at the given level and climbs one level each time a run
+stalls. With `LLM_THINKING` set, the smoke test also fails if a fragment does not switch
+the model's thinking.
 
 3. Or use the chat UI:
 
@@ -113,12 +167,15 @@ that GPU, so it cannot decide its own start.
 | `LLM_API_KEY` | `EMPTY` | Endpoint key |
 | `LLM_MODEL` | `agent-model` | Served model name |
 | `LLM_TEMPERATURE` | `0.2` | Sampling temperature; see the model's recipe |
-| `LLM_EXTRA_BODY` | `{}` | Extra request fields as JSON, for example a reasoning switch |
+| `LLM_EXTRA_BODY` | `{}` | Extra request fields sent on every call, as JSON (for example `top_p`) |
+| `LLM_THINKING` | `{}` | Request fields that switch the model's thinking: JSON with `off`, `on` and optionally `max` |
+| `LLM_KEEP_REASONING` | `0` | `1` sends the model's reasoning back with each tool-call turn (Gemma 4, DeepSeek V4) |
+| `LLM_CONTEXT_WINDOW` | `32768` | The server's `--max-model-len`; the prompt budget shrinks to leave room for the reply |
 | `AGENT_WORKSPACE` | `workspace` | The only folder the file and shell tools may touch |
 | `AGENT_SKILLS` | `skills` | Folder of `<name>/SKILL.md` |
 | `AGENT_TRACE` | `trace.jsonl` | One JSON line per model call and tool call |
 | `AGENT_CHECKPOINTS` | `checkpoints` | Saved state for `--resume` |
-| `AGENT_MAX_STEPS` | `25` | Step cap per agent |
+| `AGENT_MAX_STEPS` | `0` | Lowers the step cap for every effort level; `0` keeps each level's own cap |
 | `AGENT_CONTEXT_BUDGET` | `24000` | Prompt tokens before older turns are summarised |
 | `AGENT_AUTO_APPROVE` | `0` | `1` skips approvals; only for a throwaway sandbox |
 | `RUNPOD_POD_ID`, `RUNPOD_API_KEY` | unset | Set both to let the pod manager start and stop the pod |
@@ -146,6 +203,11 @@ All ten configurations, the price table and the caveats are in
 ## Limits you should know about
 
 - **Not tested on real GPUs.** Run `harness/smoke_test.py` and your own evals first.
+- **The thinking switches are untested on live models.** They come from the vLLM
+  documentation, recipes and source as of 27 November 2026. Run the smoke test with
+  `LLM_THINKING` set before trusting any level above low.
+- **Higher effort costs more.** High and above think on every call and add at least one
+  more model call per task; a review is a second agent run.
 - **The approval layer is not a sandbox.** Runpod pods cannot run nested containers, so
   put the workspace on a separate disposable pod or VM that holds no credentials.
 - **The chat UI has no login** and all runs share one workspace. Keep it on localhost or

@@ -33,19 +33,27 @@ def cut(*names):
 
 
 excerpts = {
-    "call_model": cut("call_model"),
+    "call_model": cut("Reply", "call_model"),
     "run_agent": cut("run_agent"),
     "registry": cut("Tool", "REGISTRY", "obj", "tool"),
     "edit_file": cut("edit_file"),
     "execute": cut("clip", "execute"),
-    "subagents": cut("WORKER_TOOLS", "ORCHESTRATOR_TOOLS", "WORKER_SYSTEM", "spawn_agent"),
+    "subagents": cut("WORKER_TOOLS", "ORCHESTRATOR_TOOLS", "SPAWN_LOCK", "WORKER_SYSTEM",
+                     "spawn_agent"),
     "orchestrator": cut("orchestrator_system"),
     "skills": cut("skills_index", "load_skill"),
     "context": cut("build_messages", "compact"),
     "guard": cut("inside_workspace", "READ_ONLY", "is_read_only", "approved"),
     "trace": cut("trace"),
     "longtask": cut("update_plan", "checkpoint_file", "save_checkpoint"),
+    "effort": cut("Effort", "EFFORTS", "LADDER", "GUIDANCE", "budgets", "thinking_extras"),
+    "scaffolds": cut("think", "VERIFY_PROMPT", "REVIEWER_SYSTEM", "REJECTED", "review",
+                     "run_escalating"),
 }
+# the preset table in the document is built from the same Effort(...) rows as the code
+efforts = [[ast.literal_eval(arg) for arg in node.args] for node in ast.walk(tree)
+           if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Effort"]
+json.dump(efforts, open("docs/build/out/efforts.json", "w"))
 excerpts["smoke"] = Path("harness/smoke_test.py").read_text().splitlines()
 
 

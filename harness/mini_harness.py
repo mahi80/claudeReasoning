@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 import uuid
 from collections import Counter
@@ -30,11 +31,14 @@ WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", "workspace")).resolve()
 SKILLS_DIR = Path(os.environ.get("AGENT_SKILLS", "skills")).resolve()
 TRACE_FILE = Path(os.environ.get("AGENT_TRACE", "trace.jsonl"))
 CHECKPOINT_DIR = Path(os.environ.get("AGENT_CHECKPOINTS", "checkpoints"))
-MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "25"))
+MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "0"))            # 0: effort preset
 CONTEXT_BUDGET = int(os.environ.get("AGENT_CONTEXT_BUDGET", "24000"))  # prompt tokens
+CONTEXT_WINDOW = int(os.environ.get("LLM_CONTEXT_WINDOW", "32768"))    # --max-model-len
 AUTO_APPROVE = os.environ.get("AGENT_AUTO_APPROVE", "0") == "1"
 TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))      # see the model card
-EXTRA_BODY = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))    # e.g. reasoning mode
+EXTRA_BODY = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))    # sent on every call
+THINKING = json.loads(os.environ.get("LLM_THINKING", "{}"))        # off / on / max
+KEEP_REASONING = os.environ.get("LLM_KEEP_REASONING", "0") == "1"
 MAX_TOOL_CHARS = 6000   # tool output handed back to the model
 KEEP_RECENT = 8         # messages kept word for word when compacting
 
@@ -50,6 +54,68 @@ def trace(event: str, **data) -> None:
         f.write(json.dumps(record) + "\n")
     for listener in LISTENERS:
         listener(record)
+
+
+# ---------------------------------------------------------------- effort levels
+@dataclass(frozen=True)
+class Effort:
+    """One preset: how hard the harness lets the model work on a task."""
+    name: str
+    thinking: str      # off | key (first step, and after a failed tool call) | all | max
+    max_steps: int
+    max_tokens: int    # per model call, thinking included
+    workers: int       # worker agents one run may start
+    verify: bool       # one self-check before an answer is accepted
+    reviews: int       # independent reviews; a failed review costs one more attempt
+
+
+EFFORTS = {e.name: e for e in (
+    Effort("low", "off", 8, 4096, 0, False, 0),
+    Effort("medium", "key", 20, 4096, 2, False, 0),
+    Effort("high", "all", 40, 8192, 4, True, 0),
+    Effort("xhigh", "all", 80, 8192, 6, True, 1),
+    Effort("max", "max", 150, 16384, 8, True, 2),
+)}
+LADDER = list(EFFORTS)
+GUIDANCE = {   # the behavioural half of a level: one line added to every system prompt
+    "low": "Effort: low. Take the shortest route to a correct result. Skip planning for "
+           "simple work and do nothing beyond what was asked.",
+    "medium": "Effort: medium. Plan briefly, then act. Check what is cheap to check.",
+    "high": "Effort: high. Plan before you act and check each result before you rely "
+            "on it.",
+    "xhigh": "Effort: extra high. Weigh alternatives before you commit, test edge cases "
+             "and confirm every claim with a tool before you answer.",
+    "max": "Effort: maximum. Be exhaustive. Break the problem down fully, question "
+           "your own assumptions and verify the result in more than one way before you "
+           "answer.",
+}
+BUDGET = contextvars.ContextVar("budget", default=None)   # per run: effort, workers
+
+
+def budgets(effort: Effort) -> tuple[int, int]:
+    """(max_tokens, prompt budget): a longer reply leaves less room for history."""
+    max_tokens = min(effort.max_tokens, CONTEXT_WINDOW // 2)
+    return max_tokens, min(CONTEXT_BUDGET, CONTEXT_WINDOW - max_tokens - 4096)
+
+
+def thinking_extras(effort: Effort, step: int, turns: list[dict]) -> dict:
+    """Request fields that switch the model's own thinking for this one call.
+
+    'key' pays for thinking only where it matters most: the first step, and the step
+    after a tool call failed. LLM_THINKING maps off / on / max to your model's fields.
+    """
+    mode = effort.thinking
+    if mode == "key":
+        results = []
+        for message in reversed(turns):               # the newest batch of tool results
+            if message["role"] != "tool":
+                break
+            results.append(message["content"])
+        stuck = any(r.startswith(("ERROR", "DENIED")) for r in results)
+        mode = "on" if step == 1 or stuck else "off"
+    elif mode == "all" or (mode == "max" and "max" not in THINKING):
+        mode = "on"
+    return THINKING.get(mode, {})
 
 
 # ---------------------------------------------------------------- tool registry
@@ -196,36 +262,54 @@ def load_skill(name: str) -> str:
 
 
 # ---------------------------------------------------------------- model call
-def call_model(messages: list[dict], tools: list[Tool]) -> tuple[str, list[dict], int]:
-    """One streamed completion. Returns (text, tool_calls, prompt_tokens).
+@dataclass
+class Reply:
+    text: str
+    calls: list[dict]
+    thought: str = ""          # the model's reasoning, when the server separates it
+    prompt_tokens: int = 0
+    output_tokens: int = 0     # thinking included
+
+
+def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
+               extras: dict | None = None) -> Reply:
+    """One streamed completion.
 
     Streaming keeps bytes flowing, which matters behind proxies that drop idle
     connections (Runpod's HTTP proxy closes them after 100 seconds).
     """
+    body = dict(EXTRA_BODY)
+    for key, value in (extras or {}).items():          # merge nested dicts one level deep
+        both = isinstance(value, dict) and isinstance(body.get(key), dict)
+        body[key] = {**body[key], **value} if both else value
     kwargs = dict(model=MODEL, messages=messages, temperature=TEMPERATURE,
-                  max_tokens=4096, stream=True, stream_options={"include_usage": True},
-                  extra_body=EXTRA_BODY)
+                  max_tokens=max_tokens, stream=True,
+                  stream_options={"include_usage": True}, extra_body=body)
     if tools:
         kwargs.update(tools=[t.schema() for t in tools], tool_choice="auto")
-    text, calls, prompt_tokens = [], {}, 0
+    reply, text, thought, calls = Reply("", []), [], [], {}
     for chunk in client.chat.completions.create(**kwargs):
         if chunk.usage:
-            prompt_tokens = chunk.usage.prompt_tokens
+            reply.prompt_tokens = chunk.usage.prompt_tokens
+            reply.output_tokens = chunk.usage.completion_tokens or 0
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
         if delta.content:
             text.append(delta.content)
+        thought.append(getattr(delta, "reasoning", None)      # vLLM's field name, and
+                       or getattr(delta, "reasoning_content", None) or "")   # its old one
         for tc in delta.tool_calls or []:
             slot = calls.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
             slot["id"] = tc.id or slot["id"]
             if tc.function:
                 slot["name"] += tc.function.name or ""
                 slot["arguments"] += tc.function.arguments or ""
-    ordered = [calls[i] for i in sorted(calls)]
-    for c in ordered:
+    reply.calls = [calls[i] for i in sorted(calls)]
+    for c in reply.calls:
         c["id"] = c["id"] or uuid.uuid4().hex[:9]
-    return "".join(text), ordered, prompt_tokens
+    reply.text, reply.thought = "".join(text), "".join(thought)
+    return reply
 
 
 # ---------------------------------------------------------------- tool execution
@@ -280,8 +364,8 @@ def build_messages(system: str, task: str, summary: str, turns: list[dict],
 def compact(turns: list[dict], summary: str) -> tuple[list[dict], str]:
     """Fold older turns into a model-written summary; keep recent turns verbatim."""
     old, recent = turns[:-KEEP_RECENT], turns[-KEEP_RECENT:]
-    while recent and recent[0]["role"] == "tool":   # never orphan a tool result
-        old.append(recent.pop(0))
+    while recent and recent[0]["role"] != "assistant":   # never orphan a tool result,
+        old.append(recent.pop(0))                        # never open on a user nudge
     if not old:
         return turns, summary
     lines = [m["role"] + ": "
@@ -290,7 +374,7 @@ def compact(turns: list[dict], summary: str) -> tuple[list[dict], str]:
     prompt = ("Summarise this agent transcript for the agent itself. Keep decisions, "
               "file paths, results and open items. Be brief.\n\n"
               + (f"Earlier summary: {summary}\n\n" if summary else "") + "\n".join(lines))
-    new_summary, _, _ = call_model([{"role": "user", "content": prompt}], [])
+    new_summary = call_model([{"role": "user", "content": prompt}], []).text
     trace("compact", folded=len(old), kept=len(recent))
     return recent, new_summary
 
@@ -329,12 +413,57 @@ def save_checkpoint(task: str, summary: str, turns: list[dict]) -> None:
     draft.replace(target)         # atomic swap: never a half-written checkpoint
 
 
+# ---------------------------------------------------------------- reasoning scaffolds
+@tool("think", "Write down your reasoning before you act. It changes nothing and fetches "
+      "nothing. Use it to work through a surprising tool result, weigh options, or check "
+      "a plan against the task when the next step is not obvious.",
+      obj(thought="Your reasoning, in a few sentences"), parallel=True)
+def think(thought: str) -> str:
+    return "noted"
+
+
+VERIFY_PROMPT = (
+    "Before this goes to the user, check it against the task. Use your tools to confirm "
+    "anything you have not verified. If the answer is right and complete, reply with "
+    "the single word CONFIRMED. If not, fix the problem, then give the full corrected "
+    "answer.")
+
+REVIEWER_SYSTEM = (
+    "You are an independent reviewer. You did not do the work. Check the answer against "
+    "the task, using your tools to inspect the workspace. Reply PASS on the first line "
+    "if it fully meets the task. Otherwise reply FAIL on the first line, then list the "
+    "specific problems.")
+
+REJECTED = ("An independent reviewer rejected the answer:\n{verdict}\n\n"
+            "Fix these problems, then give the full corrected answer.")
+
+
+def review(task: str, answer: str, effort: str) -> str:
+    """A second opinion from a fresh context that never saw how the answer was made."""
+    brief = f"Task given to the agent:\n{task}\n\nAnswer it produced:\n{answer}"
+    return run_agent(brief, REVIEWER_SYSTEM, ["read_file", "list_dir", "think"],
+                     label="reviewer", effort=effort)
+
+
 # ---------------------------------------------------------------- the loop
 def run_agent(task: str, system: str, tool_names: list[str], label: str = "main",
-              resume: bool = False) -> str:
+              resume: bool = False, effort: str = "medium") -> str:
     """The whole agent: call the model, run the tools it asks for, repeat."""
+    level, main = EFFORTS[effort], label == "main"
+    system = f"{system}\n\n{GUIDANCE[level.name]}"
     allowed = {n: REGISTRY[n] for n in tool_names if n in REGISTRY}
-    turns, summary, seen = [], "", Counter()
+    if level.thinking == "off":
+        allowed.pop("think", None)                    # low effort: act, do not deliberate
+    if main:
+        BUDGET.set({"effort": level, "workers": 0})
+        if level.workers == 0:
+            allowed.pop("spawn_agent", None)          # and do not delegate
+        trace("run", effort=level.name, resume=resume)
+    limit = level.max_steps if main else min(level.max_steps, 40)
+    limit = min(limit, MAX_STEPS) if MAX_STEPS else limit
+    max_tokens, prompt_budget = budgets(level)
+    verified, reviews = not (main and level.verify), level.reviews if main else 0
+    turns, summary, seen, blank, draft = [], "", Counter(), False, ""
     planning = "update_plan" in allowed
     saved = checkpoint_file(task)
     if resume and saved.exists():
@@ -343,18 +472,46 @@ def run_agent(task: str, system: str, tool_names: list[str], label: str = "main"
         trace("resume", agent=label, turns=len(turns))
     elif planning:
         plan_path().unlink(missing_ok=True)       # a new task starts without an old plan
-    for step in range(1, MAX_STEPS + 1):
+    for step in range(1, limit + 1):
         plan = plan_path().read_text() if planning and plan_path().exists() else ""
         messages = build_messages(system, task, summary, turns, plan)
-        text, calls, prompt_tokens = call_model(messages, list(allowed.values()))
-        trace("model", agent=label, step=step, prompt_tokens=prompt_tokens,
+        extras = THINKING.get("off", {}) if blank else thinking_extras(level, step, turns)
+        reply = call_model(messages, list(allowed.values()), max_tokens, extras)
+        text, calls = reply.text, reply.calls
+        trace("model", agent=label, step=step, prompt_tokens=reply.prompt_tokens,
+              output_tokens=reply.output_tokens, reasoning_chars=len(reply.thought),
               tool_calls=[c["name"] for c in calls])
+        if not calls and not text.strip() and not blank:
+            blank = True              # thinking used the whole reply: retry without it
+            trace("blank", agent=label, step=step)
+            continue
+        blank = False
         if not calls:
-            return text                                   # plain answer = finished
-        turns.append({"role": "assistant", "content": text or None, "tool_calls": [
+            if draft and text.strip().upper().startswith("CONFIRMED"):
+                text = draft                          # the check kept the earlier answer
+            nudge = ""
+            if not verified:                          # self-check, once per run
+                verified, nudge = True, VERIFY_PROMPT
+            elif reviews:                             # second opinion, fresh context
+                reviews -= 1
+                verdict = review(task, text, level.name).strip()
+                failed = verdict.upper().startswith("FAIL")   # anything else: accept
+                trace("review", passed=not failed)
+                reviews = reviews if failed else 0
+                nudge = REJECTED.format(verdict=clip(verdict, 2000)) if failed else ""
+            if not nudge:
+                return text                           # plain answer = finished
+            draft = text
+            turns += [{"role": "assistant", "content": text or "(no answer)"},
+                      {"role": "user", "content": nudge}]
+            continue
+        turn = {"role": "assistant", "content": text or None, "tool_calls": [
             {"id": c["id"], "type": "function",
              "function": {"name": c["name"], "arguments": c["arguments"]}}
-            for c in calls]})
+            for c in calls]}
+        if KEEP_REASONING and reply.thought:
+            turn["reasoning"] = reply.thought         # thoughts stay between tool calls
+        turns.append(turn)
         run = lambda c: execute(c, allowed, seen)
         if len(calls) > 1 and all(c["name"] in allowed and allowed[c["name"]].parallel
                                   for c in calls):
@@ -368,18 +525,33 @@ def run_agent(task: str, system: str, tool_names: list[str], label: str = "main"
             trace("tool", agent=label, step=step, tool=c["name"], chars=len(result),
                   failed=result.startswith(("ERROR", "DENIED")))
             turns.append({"role": "tool", "tool_call_id": c["id"], "content": result})
-        if prompt_tokens > CONTEXT_BUDGET:
+        if reply.prompt_tokens > prompt_budget:
             turns, summary = compact(turns, summary)
-        if label == "main":
+        if main:
             save_checkpoint(task, summary, turns)
     trace("step_limit", agent=label)
-    return f"Stopped at the {MAX_STEPS}-step limit before finishing. {summary}".strip()
+    return f"Stopped at the {limit}-step limit before finishing. {summary}".strip()
+
+
+def run_escalating(task: str, system: str, tool_names: list[str], start: str = "low",
+                   accept: Callable[[str], bool] = lambda answer: True) -> str:
+    """Start cheap and climb one level whenever a run stalls or its answer is rejected."""
+    answer = ""
+    for name in LADDER[LADDER.index(start):]:
+        stalled = answer.startswith("Stopped at")     # a stalled run resumes
+        answer = run_agent(task, system, tool_names, effort=name, resume=stalled)
+        if not answer.startswith("Stopped at") and accept(answer):
+            break
+        trace("escalate", after=name)
+    return answer
 
 
 # ---------------------------------------------------------------- subagents
 WORKER_TOOLS = ["read_file", "write_file", "edit_file", "list_dir", "run_shell",
-                "load_skill"]
+                "load_skill", "think"]
 ORCHESTRATOR_TOOLS = WORKER_TOOLS + ["spawn_agent", "update_plan"]
+
+SPAWN_LOCK = threading.Lock()
 
 WORKER_SYSTEM = (
     "You are a worker agent. Complete the single task you are given using your tools. "
@@ -396,7 +568,14 @@ WORKER_SYSTEM = (
       obj(task="Complete brief for the worker: goal, inputs, constraints, report wanted"),
       parallel=True)
 def spawn_agent(task: str) -> str:
-    return run_agent(task, WORKER_SYSTEM, WORKER_TOOLS, label="worker")   # no nesting
+    budget = BUDGET.get() or {"effort": EFFORTS["medium"], "workers": 0}
+    with SPAWN_LOCK:                                  # parallel calls share one budget
+        if budget["workers"] >= budget["effort"].workers:
+            return (f"ERROR: this effort level allows {budget['effort'].workers} worker "
+                    "agents and they are used up. Do the remaining work yourself.")
+        budget["workers"] += 1
+    return run_agent(task, WORKER_SYSTEM, WORKER_TOOLS, label="worker",
+                     effort=budget["effort"].name)    # no spawn tool here: no nesting
 
 
 def orchestrator_system() -> str:
@@ -405,10 +584,12 @@ def orchestrator_system() -> str:
 How to work:
 - For a task with more than a few steps, save a checklist with update_plan first. Tick
   steps off as you finish them and change the plan when the facts change.
-- Split the task into parts. Do dependent parts in order. Hand independent parts to
-  spawn_agent, all in one turn, so they run in parallel.
+- Split the task into parts. Do dependent parts in order. If you have spawn_agent, hand
+  independent parts to it, all in one turn, so they run in parallel.
 - Do small things yourself. Delegating costs a full briefing.
 - Read before you edit. Check a result before you report it.
+- When a result surprises you and you have the think tool, reason it through there
+  before the next call.
 - If a tool returns ERROR, fix the call or change approach. Never repeat it unchanged.
 - When finished, reply in plain text: what you did and what is left.
 
@@ -417,8 +598,18 @@ Skills (call load_skill before work that one covers):
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
+    cli = argparse.ArgumentParser(description="Run one task through the agent loop.")
+    cli.add_argument("task", nargs="+")
+    cli.add_argument("--effort", choices=LADDER, default="medium")
+    cli.add_argument("--resume", action="store_true", help="continue from the checkpoint")
+    cli.add_argument("--escalate", action="store_true",
+                     help="start at --effort and climb a level each time a run stalls")
+    args = cli.parse_args()
     WORKSPACE.mkdir(parents=True, exist_ok=True)
-    args = [a for a in sys.argv[1:] if a != "--resume"]
-    print(run_agent(" ".join(args), orchestrator_system(), ORCHESTRATOR_TOOLS,
-                    resume="--resume" in sys.argv))
+    prompt, system = " ".join(args.task), orchestrator_system()
+    if args.escalate:
+        print(run_escalating(prompt, system, ORCHESTRATOR_TOOLS, start=args.effort))
+    else:
+        print(run_agent(prompt, system, ORCHESTRATOR_TOOLS, resume=args.resume,
+                        effort=args.effort))

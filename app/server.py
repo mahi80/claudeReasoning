@@ -13,6 +13,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -24,6 +25,9 @@ import mini_harness as h  # noqa: E402
 import pod_manager  # noqa: E402
 
 APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT", "300"))   # seconds
+EFFORT_LABELS = {"low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
+                 "max": "Max"}
+Level = Literal["low", "medium", "high", "xhigh", "max"]
 
 app = FastAPI(title="Agent chat")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -73,9 +77,12 @@ def on_trace(record: dict) -> None:
     if run is None:
         return
     if record["event"] == "model" and record["tool_calls"]:
-        who = "Worker" if record["agent"] == "worker" else "Agent"
+        who = {"worker": "Worker", "reviewer": "Reviewer"}.get(record["agent"], "Agent")
         tools = html.escape(", ".join(record["tool_calls"]))
         run.emit("status", f"{who} step {record['step']}: {tools}")
+    elif record["event"] == "review":
+        verdict = "passed" if record["passed"] else "changes requested"
+        run.emit("status", f"Independent review: {verdict}")
     elif record["event"] == "plan":
         run.emit("plan", html.escape(record["plan"]).replace("\n", "<br>"))
     elif record["event"] == "compact":
@@ -86,13 +93,14 @@ h.LISTENERS.append(on_trace)
 h.ask_operator = lambda name, args: bool(current_run() and current_run().ask(name, args))
 
 
-def work(run: Run, message: str) -> None:
+def work(run: Run, message: str, effort: str) -> None:
     """Background thread: make sure the GPU is up, then run the agent loop."""
     h.RUN_ID.set(run.id)
     try:
         pod_manager.ensure_ready(lambda text: run.emit("status", html.escape(text)))
-        run.emit("status", "Working")
-        answer = h.run_agent(message, h.orchestrator_system(), h.ORCHESTRATOR_TOOLS)
+        run.emit("status", f"Working at {EFFORT_LABELS[effort].lower()} effort")
+        answer = h.run_agent(message, h.orchestrator_system(), h.ORCHESTRATOR_TOOLS,
+                             effort=effort)
         run.emit("answer", html.escape(answer).replace("\n", "<br>"))   # never raw HTML
     except Exception as err:
         failure = html.escape(f"{type(err).__name__}: {err}")
@@ -133,8 +141,10 @@ PAGE = """<!doctype html>
   .error { color: #a12626; }
   form { display: flex; gap: 8px; position: sticky; bottom: 0; padding: 12px 0;
          background: #f5f6f8; }
-  input { flex: 1; padding: 10px; font-size: 16px; border: 1px solid #c3cad4;
+  input { flex: 1; min-width: 0; padding: 10px; font-size: 16px; border: 1px solid #c3cad4;
           border-radius: 8px; }
+  select { padding: 10px 4px; font-size: 16px; border: 1px solid #c3cad4;
+           border-radius: 8px; background: #fff; color: inherit; }
   button { padding: 10px 16px; font-size: 16px; border: 0; border-radius: 8px;
            background: #1f3a5f; color: #fff; }
 </style></head>
@@ -142,11 +152,14 @@ PAGE = """<!doctype html>
 <h1>Agent chat</h1>
 <div id="messages"></div>
 <form hx-post="/chat" hx-target="#messages" hx-swap="beforeend"
-      hx-on::after-request="this.reset()">
+      hx-on::after-request="this.elements.message.value = ''">
   <input name="message" placeholder="Give the agent a task" required autofocus>
+  <select name="effort" aria-label="Effort">__EFFORTS__</select>
   <button>Send</button>
 </form>
-</main></body></html>"""
+</main></body></html>""".replace("__EFFORTS__", "".join(
+    f'<option value="{value}"{" selected" if value == "medium" else ""}>{label}</option>'
+    for value, label in EFFORT_LABELS.items()))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -155,11 +168,11 @@ def index() -> str:
 
 
 @app.post("/chat", response_class=HTMLResponse)
-def chat(message: str = Form(...)) -> str:
+def chat(message: str = Form(...), effort: Level = Form("medium")) -> str:
     """Start a run and return the two chat bubbles; the second listens for events."""
     run = Run()
     RUNS[run.id] = run
-    threading.Thread(target=work, args=(run, message), daemon=True).start()
+    threading.Thread(target=work, args=(run, message, effort), daemon=True).start()
     return (f'<div class="msg user">{html.escape(message)}</div>'
             f'<div class="msg agent" sse-connect="/runs/{run.id}/events" sse-close="done">'
             '<div class="plan" sse-swap="plan"></div>'

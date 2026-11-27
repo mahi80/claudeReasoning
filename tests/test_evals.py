@@ -37,5 +37,24 @@ ok = (report["runs"] == 4 and report["pass_rate"] == 0.75
       and not rows["never"]["passed"] and rows["never"]["hit_step_limit"]
       and report["step_limit_rate"] == 0.25 and not mock_llm.ERRORS)
 print("PASS eval runner" if ok else "FAIL eval runner")
+
+# the same task set at three effort levels: what each level buys, and what it costs
+import subprocess  # noqa: E402
+
+graded = tmp / "graded.jsonl"
+graded.write_text("\n".join(json.dumps(c) for c in [
+    {"id": "needs-think", "task": "[scenario:think] eval", "check": "grep -q noted"},
+    {"id": "needs-check", "task": "[scenario:verify] eval", "check": "grep -q checked"},
+]))
+run = subprocess.run(
+    [sys.executable, str(ROOT / "harness" / "run_evals.py"), str(graded), "1",
+     "--effort", "low", "medium", "high"], capture_output=True, text=True, timeout=120)
+table = [line.split() for line in run.stdout.strip().splitlines()[-3:]]
+levels = (run.returncode == 0 and table == [["low", "0.0", "2.0", "20"],
+                                             ["medium", "0.5", "2.0", "20"],
+                                             ["high", "1.0", "3.5", "35"]]
+          and not mock_llm.ERRORS)
+print("PASS eval runner compares effort levels" if levels
+      else f"FAIL eval runner compares effort levels  [{table} {run.stderr[-300:]}]")
 server.shutdown()
-sys.exit(0 if ok else 1)
+sys.exit(0 if ok and levels else 1)
