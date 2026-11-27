@@ -75,7 +75,8 @@ setup() {
   } > "$OUT/system.log" 2>&1
   python3 -m pip install -q uv || python3 -m pip install -q --break-system-packages uv
   (
-    HF_HUB_DISABLE_PROGRESS_BARS=1 uvx --from "huggingface_hub[hf_xet]" hf download "$MODEL"
+    HF_HUB_DISABLE_PROGRESS_BARS=1 HF_XET_HIGH_PERFORMANCE=1 \
+      uvx --from "huggingface_hub[hf_xet]" hf download "$MODEL"
     echo "download exit $?"
   ) > "$OUT/download.log" 2>&1 &
   (
