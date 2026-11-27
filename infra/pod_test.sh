@@ -3,6 +3,7 @@
 # machine only, then run the smoke test, one task and the eval set against it.
 #
 #   bash pod_test.sh gemma4                 # one 80 GB GPU
+#   bash pod_test.sh deepseek-v4            # one B300 (288 GB)
 #   bash pod_test.sh deepseek-v41           # four H200
 #   bash pod_test.sh gemma4 setup serve     # only some steps: setup serve smoke evals
 #
@@ -21,7 +22,7 @@
 #   SERVE_EXTRA   extra `vllm serve` flags, for example "--enforce-eager"
 #   READY_TIMEOUT seconds to wait for the server (3600)
 set -u
-PRESET=${1:?usage: pod_test.sh gemma4|deepseek-v41 [setup] [serve] [smoke] [evals]}
+PRESET=${1:?usage: pod_test.sh gemma4|deepseek-v4|deepseek-v41 [setup] [serve] [smoke] [evals]}
 shift
 STEPS=${*:-setup serve smoke evals}
 
@@ -48,6 +49,25 @@ case "$PRESET" in
     export LLM_THINKING_SCOPE=${LLM_THINKING_SCOPE:-task}
     export LLM_THINKING=${LLM_THINKING:-'{"off": {"chat_template_kwargs": {"enable_thinking": false}},
       "on": {"chat_template_kwargs": {"enable_thinking": true}}}'}
+    ;;
+  deepseek-v4)
+    # The recipe's single-GPU settings for a Blackwell card. --trust-remote-code runs code
+    # from the model repository, so keep this to a disposable pod.
+    MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
+    SERVE=(--trust-remote-code --kv-cache-dtype fp8 --block-size 256
+           --tensor-parallel-size 1 --gpu-memory-utilization 0.92
+           --attention_config.indexer_kv_dtype mxfp4 --no-enable-flashinfer-autotune
+           --tokenizer-mode deepseek_v4 --enable-auto-tool-choice --tool-call-parser deepseek_v4
+           --reasoning-parser deepseek_v4 --reasoning-config
+           '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}'
+           --max-model-len 131072)
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export LLM_CONTEXT_WINDOW=131072 LLM_KEEP_REASONING=1 LLM_TEMPERATURE=1.0
+    export LLM_EXTRA_BODY=${LLM_EXTRA_BODY:-'{"top_p": 0.95}'}
+    export LLM_THINKING_SCOPE=${LLM_THINKING_SCOPE:-task}
+    export LLM_THINKING=${LLM_THINKING:-'{"off": {"chat_template_kwargs": {"thinking": false}},
+      "brief": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "low"}},
+      "on": {"chat_template_kwargs": {"thinking": true, "reasoning_effort": "high"}}}'}
     ;;
   deepseek-v41)
     MODEL=deepseek-ai/DeepSeek-V4.1-Flash-1017
