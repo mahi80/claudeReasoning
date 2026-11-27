@@ -43,8 +43,8 @@ def run_case(case: dict, effort: str = "medium") -> dict:
         passed, why = check.returncode == 0, (check.stderr or check.stdout)[-200:].strip()
     except subprocess.TimeoutExpired:
         passed, why = False, "the check timed out"
-    if answer.startswith("RUN FAILED"):
-        why = answer[:200]
+    if answer.startswith(("RUN FAILED:", "Stopped at")):
+        passed, why = False, answer[:200]
     with h.TRACE_FILE.open() as f:
         f.seek(offset)
         events = [json.loads(line) for line in f]

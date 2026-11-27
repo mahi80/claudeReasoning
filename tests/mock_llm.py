@@ -104,6 +104,8 @@ def policy(body: dict) -> dict:
             return {"text": "first answer"}
         if "confirm" in task:
             return {"text": "CONFIRMED"}
+        if "qualified" in task:
+            return {"text": "CONFIRMED but the result needs changes"}
         if msgs[-1]["role"] == "user":
             return {"calls": [("read_file", j({"path": "v.txt"}))]}
         return {"text": f"checked answer: {last[0]}"}
@@ -126,7 +128,7 @@ def policy(body: dict) -> dict:
         if not acted:
             prefix = re.search(r"prefix=(\w+)", task).group(1)
             return {"calls": [
-                ("spawn_agent", j({"task": f"[scenario:sub] write {prefix}{n}.txt"}))
+                ("spawn_agent", j({"task": f"[scenario:sub] write {prefix}{n}.txt", "tools": ["write_file"]}))
                 for n in (1, 2, 3)]}
         return {"text": " | ".join(last_tool_results(msgs, 3))}
     if scenario == "blank":           # thinking used the whole reply: nothing came back
@@ -158,15 +160,64 @@ def policy(body: dict) -> dict:
         return {"calls": [("list_dir", j({"path": "."}))]}
     if scenario == "parallel":
         if i == 0:
-            return {"calls": [("spawn_agent", j({"task": "[scenario:sub] write p1.txt"})),
-                              ("spawn_agent", j({"task": "[scenario:sub] write p2.txt"}))]}
+            return {"calls": [("spawn_agent", j({"task": "[scenario:sub] write p1.txt", "tools": ["write_file"]})),
+                              ("spawn_agent", j({"task": "[scenario:sub] write p2.txt", "tools": ["write_file"]}))]}
         return {"text": "REPORTS: " + " | ".join(last_tool_results(msgs, 2))}
+    if scenario == "parallel_approvals":
+        if not acted:
+            return {"calls": [("spawn_agent", j({"task": "[scenario:approval_worker] first", "tools": ["run_shell"]})),
+                              ("spawn_agent", j({"task": "[scenario:approval_worker] second", "tools": ["run_shell"]}))]}
+        return {"text": "REPORTS: " + " | ".join(last_tool_results(msgs, 2))}
+    if scenario == "approval_worker":
+        if not acted:
+            return {"calls": [("run_shell", j({"command": "pwd; pwd"}))]}
+        return {"text": last[0]}
+    if scenario == "workflow":
+        result = next((m["content"] for m in reversed(msgs)
+                       if m["role"] == "tool" and m["content"].startswith("sum=")), "sum=unknown")
+        if not acted:
+            return {"calls": [("update_plan", j({"plan": "[ ] delegate arithmetic\n[ ] write report"}))]}
+        if acted == 1:
+            return {"calls": [("spawn_agent", j({"task": "[scenario:capability_worker] calculate 2 + 3",
+                                                "tools": ["load_skill", "demo__add"]}))]}
+        if acted == 2:
+            return {"calls": [("write_file", j({"path": "report.txt", "content": result}))]}
+        if acted == 3:
+            return {"calls": [("update_plan", j({"plan": "[x] delegate arithmetic\n[x] write report"}))]}
+        return {"text": "CONFIRMED" if nudged(msgs, "Before this goes to the user")
+                else "DONE: " + result}
+    if scenario == "capability_worker":
+        if not acted:
+            return {"calls": [("load_skill", j({"name": "arithmetic"}))]}
+        if acted == 1:
+            return {"calls": [("demo__add", j({"a": 2, "b": 3}))]}
+        return {"text": "sum=" + last[0]}
+    if scenario == "scoped":
+        if not acted:
+            return {"calls": [("spawn_agent", j({"task": "[scenario:scoped_worker] try writing",
+                                                "tools": ["read_file"]}))]}
+        return {"text": last[0]}
+    if scenario == "scoped_worker":
+        if not acted:
+            return {"calls": [("write_file", j({"path": "not-granted.txt", "content": "unsafe"}))]}
+        return {"text": "SCOPED: " + last[0]}
+    if scenario == "grant_escape":
+        if i < 2:
+            return {"calls": [("spawn_agent", j({"task": "do work", "tools": ["spawn_agent" if i == 0
+                                                                                else "demo__add"]}))]}
+        return {"text": " | ".join(last_tool_results(msgs, 2))}
+    if scenario == "slow":
+        return {"text": "late answer", "delay": 0.2}
     if scenario == "sub":
         name = re.search(r"write (\S+)", task).group(1)
         if i == 0:
             return {"calls": [("write_file", j({"path": name, "content": "from worker"}))],
                     "delay": 0.4}
         return {"text": f"report: {name} written", "delay": 0.4}
+    if scenario == "large_result":
+        if i == 0:
+            return {"calls": [("load_skill", j({"name": "oversized"}))]}
+        return {"text": "finished large result"}
     if scenario == "compact":
         if i < 12:
             return {"calls": [("write_file", j({"path": f"c{i}.txt", "content": "x" * 3000}))]}

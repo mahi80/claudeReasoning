@@ -68,5 +68,21 @@ levels = (run.returncode == 0 and [row[:5] for row in table] == [["low", "0.0", 
           and all(len(row) == 6 and float(row[5]) >= 0 for row in table) and not mock_llm.ERRORS)
 print("PASS eval runner compares effort levels" if levels
       else f"FAIL eval runner compares effort levels  [{table} {run.stderr[-300:]}]")
+from unittest.mock import patch  # noqa: E402
+
+artifact_case = {"id": "failed-artifact", "task": "artifact-only failure check",
+                 "files": {"finished.txt": "done"},
+                 "check_py": "from pathlib import Path\nassert Path('finished.txt').is_file()"}
+with patch.object(run_evals.h, "run_agent", side_effect=RuntimeError("model unavailable")):
+    failed = run_evals.run_case(artifact_case)
+failed_artifact = not failed["passed"] and failed["why"].startswith("RUN FAILED: RuntimeError")
+print("PASS failed runs cannot pass an artifact-only check" if failed_artifact
+      else f"FAIL failed runs cannot pass an artifact-only check  [{failed}]")
+with patch.object(run_evals.h, "run_agent",
+                  return_value="Stopped at the independent-review limit without a PASS verdict."):
+    stopped = run_evals.run_case(artifact_case)
+stopped_artifact = not stopped["passed"] and stopped["why"].startswith("Stopped at")
+print("PASS stopped runs cannot pass an artifact-only check" if stopped_artifact
+      else f"FAIL stopped runs cannot pass an artifact-only check  [{stopped}]")
 server.shutdown()
-sys.exit(0 if ok and checks and levels else 1)
+sys.exit(0 if ok and checks and levels and failed_artifact and stopped_artifact else 1)
