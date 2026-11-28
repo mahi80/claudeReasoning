@@ -200,6 +200,58 @@ class PodLifecycleTests(unittest.TestCase):
         self.health.assert_called_once_with()
         self.action.assert_called_once_with("stop")
 
+    def test_pod_that_answers_after_the_settle_window_is_stopped_again(self):
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.health.return_value = True                # back up, with no start sent from here
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + 1
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.health.assert_called_once_with()
+        self.assertFalse(pm._start_unconfirmed)
+        self.assertEqual([call.args for call in self.action.call_args_list], [("stop",), ("stop",)])
+
+    def test_request_long_after_an_idle_stop_starts_the_pod_again(self):
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + 1
+        self.health.side_effect = [False, True]        # down as requested, then up after the start
+        pm.ensure_ready()
+        self.assertEqual([call.args for call in self.action.call_args_list], [("stop",), ("start",)])
+        self.assertFalse(pm._stop_requested or pm._start_unconfirmed)
+
+    def test_unconfirmed_restart_inside_the_settle_window_is_stopped_once_idle(self):
+        self.action.side_effect = [(202, "{}"), urllib.error.URLError("reply lost"), (202, "{}")]
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.clock.return_value = 110
+        with self.assertRaises(urllib.error.URLError):
+            pm.ensure_ready()
+        self.clock.return_value = 110 + pm.IDLE_SECONDS + 1  # idle again, well inside the window
+        self.assertTrue(pm._settling())
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.health.assert_not_called()
+        self.assertEqual([call.args for call in self.action.call_args_list],
+                         [("stop",), ("start",), ("stop",)])
+
+    def test_the_health_probe_runs_outside_the_lock(self):
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + pm.IDLE_SECONDS
+        probing, release = threading.Event(), threading.Event()
+
+        def slow_probe():
+            probing.set()
+            release.wait(5)
+            return False
+        self.health.side_effect = slow_probe
+        watchdog = threading.Thread(target=pm.stop_if_idle, args=(lambda: 0,))
+        watchdog.start()
+        try:
+            self.assertTrue(probing.wait(5))
+            free = pm._lock.acquire(blocking=False)    # what a request needs to start the pod
+            if free:
+                pm._lock.release()
+            self.assertTrue(free, "the /health probe holds the lock that requests need")
+        finally:
+            release.set()
+            watchdog.join(5)
+
     def test_pod_running_long_after_a_stop_is_reused_without_a_start(self):
         self.assertTrue(pm.stop_if_idle(lambda: 0))
         self.health.return_value = True                # started from the console, say

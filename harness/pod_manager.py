@@ -107,7 +107,7 @@ def stop_if_idle(active_runs: Callable[[], int]) -> bool:
     global _stop_requested, _stop_requested_at, _start_unconfirmed
     if not POD_ID or active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
         return False
-    if _stop_requested and _settling():
+    if _stop_requested and _settling() and not _start_unconfirmed:
         return False                  # still going down after the stop we sent
     # After a stop that was not followed by an unconfirmed start, /health tells whether the
     # pod came back. The probe can take seconds, so it runs before the lock and before the
@@ -117,8 +117,9 @@ def stop_if_idle(active_runs: Callable[[], int]) -> bool:
     with _lock:
         if active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
             return False
-        if _stop_requested and (_settling() or (probe and not back_up and not _start_unconfirmed)):
-            return False              # still stopping, or stopped as requested
+        if _stop_requested and not _start_unconfirmed and (_settling() or (probe and not back_up)):
+            return False              # still stopping, or stopped as requested; a start with
+                                      # an unknown outcome is stopped even while settling
         status, _ = _action("stop")
         if not 200 <= status < 300:
             logging.getLogger(__name__).warning("Runpod rejected idle pod shutdown (HTTP %s).", status)
