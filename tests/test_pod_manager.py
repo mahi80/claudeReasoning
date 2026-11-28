@@ -18,7 +18,8 @@ class PodLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.multiple(pm, POD_ID="fixture", IDLE_SECONDS=10, START_TIMEOUT=2,
                                         POLL_SECONDS=1, STOP_SETTLE_SECONDS=300, _last_used=0,
-                                        _stop_requested=False, _stop_requested_at=0.0))
+                                        _stop_requested=False, _stop_requested_at=0.0,
+                                        _start_unconfirmed=False))
         self.clock = self.enterContext(patch.object(pm.time, "time", return_value=100))
         self.sleep = self.enterContext(patch.object(pm.time, "sleep"))
         self.health = self.enterContext(patch.object(pm, "healthy", return_value=False))
@@ -144,6 +145,48 @@ class PodLifecycleTests(unittest.TestCase):
         self.assertTrue(pm.stop_if_idle(lambda: 0))
         self.assertEqual([call.args for call in self.action.call_args_list],
                          [("stop",), ("start",), ("stop",)])
+
+    def test_unconfirmed_restart_of_a_pod_that_never_answers_is_still_stopped(self):
+        for failure in (urllib.error.URLError("reply lost"), (502, "gateway error")):
+            with self.subTest(failure=type(failure).__name__):
+                pm._last_used, pm._stop_requested, pm._start_unconfirmed = 0, False, False
+                self.clock.return_value = 100
+                self.action.reset_mock()
+                self.action.side_effect = [(202, "{}"), failure, (202, "{}")]
+                self.health.return_value = False           # the restarted model never comes up
+                self.assertTrue(pm.stop_if_idle(lambda: 0))
+                with self.assertRaises((RuntimeError, urllib.error.URLError)):
+                    pm.ensure_ready()
+                self.health.reset_mock()
+                self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + pm.IDLE_SECONDS
+                self.assertTrue(pm.stop_if_idle(lambda: 0))
+                self.health.assert_not_called()            # an unknown start is not judged by /health
+                self.assertEqual([call.args for call in self.action.call_args_list],
+                                 [("stop",), ("start",), ("stop",)])
+                self.assertFalse(pm._start_unconfirmed)
+
+    def test_rejected_start_does_not_force_a_stop(self):
+        self.action.side_effect = [(202, "{}"), (401, "unauthorized")]
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        with self.assertRaises(RuntimeError):
+            pm.ensure_ready()
+        self.assertFalse(pm._start_unconfirmed)           # Runpod refused: the pod stayed down
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + pm.IDLE_SECONDS
+        self.assertFalse(pm.stop_if_idle(lambda: 0))
+        self.health.assert_called_once_with()
+        self.assertEqual(self.action.call_count, 2)
+
+    def test_activity_during_the_health_probe_prevents_the_stop(self):
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + pm.IDLE_SECONDS
+        pm._last_used = 0
+
+        def probe():
+            pm.touch()                                     # a request arrives while /health is asked
+            return True
+        self.health.side_effect = probe
+        self.assertFalse(pm.stop_if_idle(lambda: 0))
+        self.action.assert_called_once_with("stop")
 
     def test_stop_is_not_repeated_while_the_pod_is_settling_or_down(self):
         self.health.return_value = True                # a stopping pod may still answer

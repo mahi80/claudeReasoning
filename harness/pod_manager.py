@@ -29,6 +29,7 @@ _lock = threading.Lock()
 _last_used = time.time()
 _stop_requested = False
 _stop_requested_at = 0.0
+_start_unconfirmed = False      # a start's reply was lost or a gateway error: the pod may be up
 
 
 def _settling() -> bool:
@@ -65,25 +66,30 @@ def touch() -> None:
 
 def ensure_ready(notify: Callable[[str], None] = lambda text: None) -> None:
     """Return once the model server is healthy, starting the pod first if needed."""
-    global _stop_requested
+    global _stop_requested, _start_unconfirmed
     if not POD_ID:
         return
     with _lock:                       # concurrent requests share one start
         touch()
         if _stop_requested and not _settling() and healthy():
             # Up long after our stop: a start whose reply was lost, or one from elsewhere.
-            _stop_requested = False
+            _stop_requested = _start_unconfirmed = False
             return
         restart = _stop_requested
         if not restart and healthy():
             return
         notify("Starting the GPU pod. Loading the model can take several minutes.")
-        status, _ = _action("start")
+        try:
+            status, _ = _action("start")
+        except Exception:
+            _start_unconfirmed = True     # Runpod may have acted before the reply was lost
+            raise
         if not 200 <= status < 300:
+            _start_unconfirmed = _start_unconfirmed or status >= 500   # a gateway error can follow a start
             raise RuntimeError(
                 f"Runpod rejected the pod start (HTTP {status}). "
                 "Check credentials, pod status and GPU capacity.")
-        _stop_requested = False
+        _stop_requested = _start_unconfirmed = False
         deadline = time.time() + START_TIMEOUT
         while time.time() < deadline:
             if healthy():
@@ -98,19 +104,26 @@ def ensure_ready(notify: Callable[[str], None] = lambda text: None) -> None:
 
 def stop_if_idle(active_runs: Callable[[], int]) -> bool:
     """Request shutdown after IDLE_SECONDS of inactivity. Return True if accepted."""
-    global _stop_requested, _stop_requested_at
+    global _stop_requested, _stop_requested_at, _start_unconfirmed
     if not POD_ID or active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
         return False
+    if _stop_requested and _settling():
+        return False                  # still going down after the stop we sent
+    # After a stop that was not followed by an unconfirmed start, /health tells whether the
+    # pod came back. The probe can take seconds, so it runs before the lock and before the
+    # activity check that decides last.
+    probe = _stop_requested and not _start_unconfirmed
+    back_up = healthy() if probe else False
     with _lock:
         if active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
             return False
-        if _stop_requested and (_settling() or not healthy()):
+        if _stop_requested and (_settling() or (probe and not back_up and not _start_unconfirmed)):
             return False              # still stopping, or stopped as requested
         status, _ = _action("stop")
         if not 200 <= status < 300:
             logging.getLogger(__name__).warning("Runpod rejected idle pod shutdown (HTTP %s).", status)
             return False
-        _stop_requested, _stop_requested_at = True, time.time()
+        _stop_requested, _stop_requested_at, _start_unconfirmed = True, time.time(), False
         return True
 
 
