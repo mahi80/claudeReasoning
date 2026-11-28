@@ -4,6 +4,7 @@ Uses the mock model endpoint and a mock Runpod API. Run: python tests/test_app.p
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -323,6 +324,21 @@ check("start timeout reported in the chat", "Run failed" in failed and "TimeoutE
 # 10. Runpod API key was sent on every call; model endpoint saw no malformed request
 check("Runpod calls authenticated", STATE["bad_auth"] == 0 and STATE["starts"] >= 3)
 check("no malformed model requests", not mock_llm.ERRORS, "; ".join(mock_llm.ERRORS))
+
+# 11. An invalid LLM_CALL_TIMEOUT stops the chat server at startup, before any pod is started
+async def start_once() -> None:
+    async with server.lifespan(server.app):
+        pass
+
+
+with patch.object(server.h, "CALL_TIMEOUT", 0.0):
+    try:
+        asyncio.run(start_once())
+        refused = ""
+    except ValueError as err:
+        refused = str(err)
+check("an invalid LLM_CALL_TIMEOUT stops the chat server at startup",
+      "LLM_CALL_TIMEOUT must be a positive number" in refused, refused)
 
 bad = [name for name, ok in results if not ok]
 print(f"\n{len(results) - len(bad)}/{len(results)} checks passed")

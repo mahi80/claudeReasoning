@@ -36,6 +36,7 @@ TOOLS = list(h.ORCHESTRATOR_TOOLS)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    h.check_call_timeout(h.CALL_TIMEOUT)          # refuse to start rather than start a pod per request
     if h.MCP_CONFIG:
         import mcp_bridge
         TOOLS.extend(mcp_bridge.load_config(h.MCP_CONFIG))

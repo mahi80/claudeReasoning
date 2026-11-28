@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
@@ -105,6 +106,24 @@ class RaisesOnRead(EndsWhenClosed):
     def __iter__(self):
         raise self.error
         yield
+
+
+class TimesOutAfter(EndsWhenClosed):
+    """A model stream that yields its chunks, waits, then fails with the given error, the
+    way the SDK's read timeout ends a stream."""
+
+    def __init__(self, error, after, *chunks):
+        super().__init__(*chunks)
+        self.error, self.after = error, after
+
+    def __iter__(self):
+        yield from self.chunks
+        time.sleep(self.after)
+        raise self.error
+
+
+def sdk_timeout():
+    return APITimeoutError(httpx.Request("POST", "http://127.0.0.1:9/v1"))
 
 
 def chunk(content, finish=None):
@@ -214,18 +233,27 @@ class EvalOutcomeTests(unittest.TestCase):
         reply = self.call_with(FailsWhenClosed(chunk("done", finish="stop")))
         self.assertEqual(reply.text, "done")
 
-    def test_sdk_timeout_error_becomes_the_call_timeout(self):
-        timeout = APITimeoutError(httpx.Request("POST", "http://127.0.0.1:9/v1"))
+    def test_sdk_timeout_at_the_call_limit_becomes_the_call_timeout(self):
         with self.assertRaisesRegex(TimeoutError, r"exceeded its 1-second limit \(APITimeoutError\)") as caught:
-            self.call_with(RaisesOnRead(timeout))
+            self.call_with(TimesOutAfter(sdk_timeout(), 0.95))
         self.assertIsInstance(caught.exception.__cause__, APITimeoutError)
         self.assertFalse(self.budget.stopped)
 
-    def test_timeout_of_a_call_limited_by_the_run_deadline_stops_the_run(self):
-        timeout = APITimeoutError(httpx.Request("POST", "http://127.0.0.1:9/v1"))
+    def test_early_sdk_timeout_is_left_as_the_sdk_reported_it_even_late_in_a_run(self):
+        # 300 s are left, less than the 600-second call limit: a connection the system gave
+        # up on early is neither the run's deadline nor the call's limit.
+        with self.assertRaises(APITimeoutError):
+            self.call_with(RaisesOnRead(sdk_timeout()), call_timeout=600.0, run_seconds=300.0)
+        self.assertFalse(self.budget.stopped)
+
+    def test_timeout_at_the_run_deadline_stops_the_run(self):
         with self.assertRaises(self.e.h.BudgetExceeded):
-            self.call_with(RaisesOnRead(timeout), call_timeout=600.0, run_seconds=300.0)
+            self.call_with(TimesOutAfter(sdk_timeout(), 0.7), call_timeout=600.0, run_seconds=1.0)
         self.assertEqual(self.budget.stopped, "time budget")
+
+    def test_complete_reply_survives_the_sdk_read_timeout(self):
+        reply = self.call_with(TimesOutAfter(sdk_timeout(), 0, chunk("done", finish="stop")))
+        self.assertEqual(reply.text, "done")
 
     def test_stream_that_keeps_sending_past_the_limit_is_ended_by_the_timer(self):
         TricklingModel.release.clear()
@@ -251,14 +279,12 @@ class EvalOutcomeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "LLM_CALL_TIMEOUT must be a positive number"):
                     self.e.h.RunBudget(self.e.h.EFFORTS["medium"])
 
-    def test_an_invalid_call_timeout_stops_the_harness_at_startup(self):
-        for value in ("0", "nan", "1e300"):
-            with self.subTest(value=value):
-                done = self.real_run([sys.executable, "-c", "import mini_harness"], cwd=ROOT / "harness",
-                                     env={**os.environ, "LLM_CALL_TIMEOUT": value},
-                                     capture_output=True, text=True, timeout=120)
-                self.assertNotEqual(done.returncode, 0)
-                self.assertIn("LLM_CALL_TIMEOUT must be a positive number of seconds", done.stderr)
+    def test_an_invalid_call_timeout_fails_the_run_not_the_import(self):
+        # Importing must work, so that each command-line tool reports the error its own way.
+        done = self.real_run([sys.executable, "-c", "import mini_harness"], cwd=ROOT / "harness",
+                             env={**os.environ, "LLM_CALL_TIMEOUT": "0"},
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_another_runs_records_cannot_change_the_outcome(self):
         def busy(*args, **kwargs):
