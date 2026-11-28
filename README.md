@@ -34,6 +34,7 @@ not measured.
 | `readme-progress` | This README handoff only | Documentation branch; runtime fixes below are not included |
 | `pod-lifecycle-fixes` at `0c93753` | Standalone pod lifecycle fixes, based on `main` without skills | [PR #5](https://github.com/mahi80/claudeReasoning/pull/5) open; 305/305 offline checks/tests passed; not merged |
 | `reviewer-evidence-checkpoints` at `d055fe8` | Read-only reviewer paging and checkpoint journals, based on `main` without skills or pod fixes | [PR #6](https://github.com/mahi80/claudeReasoning/pull/6) open; 323/323 offline checks/tests passed; not merged |
+| `eval-outcomes-trace` at `8711797` | Five-outcome eval reporting, per-process trace lock and regression tests, based on `main` without other runtime concerns | [PR #7](https://github.com/mahi80/claudeReasoning/pull/7) open; 313/313 offline checks/tests passed; not merged |
 
 The imported skills carry pinned provenance and license notices. Loader/provenance
 checks passed; no third-party executables, hooks, assets or dependencies were installed.
@@ -69,9 +70,11 @@ skills import and these uncommitted changes applied:
 The combined local `runtime-reliability` integration remains uncommitted and is not a
 remote branch. Individual concerns are being published as separate review PRs listed
 above, each based directly on `main` without the skills import. PR #5 contains only pod
-lifecycle source/tests; PR #6 contains reviewer paging and checkpoint journals. Eval/trace
-publication remains next. PR #6 changes the checkpoint format and requires fresh task
-runs for older checkpoint files; it does not introduce evidence retention or OS isolation.
+lifecycle source/tests; PR #6 contains reviewer paging and checkpoint journals; PR #7
+contains the eval outcomes and trace lock. All three are independently reviewable against
+`main`; none inherits `skills-import`. PR #6 changes the checkpoint format and requires
+fresh task runs for older checkpoint files; it does not introduce evidence retention
+or OS isolation.
 The local integration applied cleanly and preserved both bots' mock-model scenarios;
 there was no manual conflict resolution. Preserve both sets if a later integration
 conflicts in the shared mock endpoint. No runtime PR has been merged.
@@ -124,15 +127,19 @@ validate the new delivery stages or the full 19-case benchmark.
 
 Remaining work, in order:
 
-1. Review and publish the local runtime patch on a separate branch, then integrate the
-   published skills with explicit approval; do not overwrite either bot's worktree.
-2. Add a CI driver for the offline suites; keep browser prerequisites/skips explicit.
-3. Rerun browser coverage and connect delivery-stage execution/results to the chat UI.
-4. Separately authorize a bounded live-model delivery/eval validation and confirm actual
+1. Adversarially review the three independent runtime PRs; merge only with explicit
+   approval. Keep the original combined worktree intact.
+2. Measure and reduce the imported skill index's per-request cost before merging the
+   library; add imported license attribution to root NOTICE and publish a skills PR.
+3. Move this coordination snapshot into a linked progress document; update README
+   baseline counts only after the corresponding code lands.
+4. Resume the offline CI driver, browser rerun and delivery-stage/chat integration.
+   CI/browser work was paused before implementation for this PR-splitting priority.
+5. Separately authorize a bounded live-model delivery/eval validation and confirm actual
    pod shutdown, preserving failures and assisted results as well as successes.
-5. Enforce host/container isolation and deployment budgets. Current workspace checks and
+6. Enforce host/container isolation and deployment budgets. Current workspace checks and
    approvals are not an OS sandbox; model-token budgets do not cap GPU rental spending.
-6. Rebuild and review the design document after the implementation settles.
+7. Rebuild and review the design document after the implementation settles.
 
 ## What is in here
 
