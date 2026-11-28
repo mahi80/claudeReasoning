@@ -222,9 +222,13 @@ out = dt.run_checks("env", "probe the environment")
 keys = set(next(line for line in out.splitlines() if line.startswith("KEYS=")).removeprefix("KEYS=").split(","))
 allowed_keys = {"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "PASS_PROBE", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC",
                 "PATHEXT", "WINDIR"}
+# On Linux the check's own Python adds LC_CTYPE when it finds no locale (PEP 538 C-locale
+# coercion), so the probe may report it; what the harness hands over must still be the list.
+passed_env = set(dt.check_env(dt.CONFIG, dt.CONFIG.checks["env"]))
 check("checks run with a private HOME, no git state and only allow-listed variables",
       out.startswith("exit=0") and f"HOME={dt.checks_home(dt.CONFIG)}" in out and "SECRET_PROBE=False" in out
-      and "PASS_PROBE=passed-through" in out and keys <= allowed_keys and "PASS_PROBE" in keys
+      and "PASS_PROBE=passed-through" in out and keys <= allowed_keys | {"LC_CTYPE"} and "PASS_PROBE" in keys
+      and passed_env <= allowed_keys and "PASS_PROBE" in passed_env
       and dt.checks_home(dt.CONFIG) != dt.git_state(dt.CONFIG)
       and not (dt.checks_home(dt.CONFIG) / "gitconfig").exists(), out)
 unknown = dt.run_checks("nope", "x")
