@@ -5,6 +5,7 @@ model runs on that GPU. Leave RUNPOD_POD_ID unset to manage nothing (local or al
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,7 @@ POLL_SECONDS = float(os.environ.get("POD_POLL_SECONDS", "10"))
 
 _lock = threading.Lock()
 _last_used = time.time()
+_stop_requested = False
 
 
 def healthy() -> bool:
@@ -54,14 +56,21 @@ def touch() -> None:
 
 def ensure_ready(notify: Callable[[str], None] = lambda text: None) -> None:
     """Return once the model server is healthy, starting the pod first if needed."""
+    global _stop_requested
     if not POD_ID:
         return
     with _lock:                       # concurrent requests share one start
         touch()
-        if healthy():
+        restart = _stop_requested
+        if not restart and healthy():
             return
         notify("Starting the GPU pod. Loading the model can take several minutes.")
-        status, body = _action("start")
+        status, _ = _action("start")
+        if not 200 <= status < 300:
+            raise RuntimeError(
+                f"Runpod rejected the pod start (HTTP {status}). "
+                "Check credentials, pod status and GPU capacity.")
+        _stop_requested = False
         deadline = time.time() + START_TIMEOUT
         while time.time() < deadline:
             if healthy():
@@ -70,26 +79,36 @@ def ensure_ready(notify: Callable[[str], None] = lambda text: None) -> None:
                 return
             time.sleep(POLL_SECONDS)
         raise TimeoutError(
-            f"GPU pod not healthy after {START_TIMEOUT:.0f}s. Runpod start call returned "
-            f"{status}: {body[:200]}. Check GPU capacity and the pod log.")
+            f"GPU pod not healthy after {START_TIMEOUT:.0f}s. Runpod accepted the start "
+            f"(HTTP {status}). Check GPU capacity and the pod log.")
 
 
 def stop_if_idle(active_runs: Callable[[], int]) -> bool:
-    """Stop the pod when nothing has used it for IDLE_SECONDS. Returns True if stopped."""
+    """Request shutdown after IDLE_SECONDS of inactivity. Return True if accepted."""
+    global _stop_requested
     if not POD_ID or active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
         return False
     with _lock:
-        if active_runs() > 0 or not healthy():
+        if _stop_requested or active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
             return False
         status, _ = _action("stop")
-        return status < 300
+        if not 200 <= status < 300:
+            logging.getLogger(__name__).warning("Runpod rejected idle pod shutdown (HTTP %s).", status)
+            return False
+        _stop_requested = True
+        return True
 
 
 def start_watchdog(active_runs: Callable[[], int], every: float = 60) -> threading.Thread:
     def loop() -> None:
         while True:
             time.sleep(every)
-            stop_if_idle(active_runs)
+            try:
+                stop_if_idle(active_runs)
+            except (urllib.error.URLError, OSError) as error:
+                logging.getLogger(__name__).warning(
+                    "Runpod idle shutdown failed; retrying at the next interval (%s).",
+                    type(error).__name__)
 
     thread = threading.Thread(target=loop, daemon=True, name="pod-idle-watchdog")
     thread.start()
