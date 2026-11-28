@@ -11,7 +11,7 @@ design document that explains every part.
 > Decode CUDA graphs replaced eager execution: the original workflow passed 17/17
 > checks with independent PASS in 63.9 seconds under the unchanged 600-second limit.
 > Four selected cases at low/medium passed 8/8 under the original 90-second limits.
-> Failed eager baselines are preserved. This is not a full 18-case benchmark or
+> Failed eager baselines are preserved. This is not a full 19-case benchmark or
 > production-readiness evidence; see [`infra/runpod.md`](infra/runpod.md) for the
 > tested configuration, safety checks and remaining deployment-specific limits.
 
@@ -117,8 +117,11 @@ AGENT_WORKSPACE=/tmp/eval-workspace python harness/run_evals.py evals/tasks.agen
 ```
 
 The last lines of the output give pass rate, steps and output tokens per level.
-`evals/tasks.agent.jsonl` contains 18 cases; `evals/tasks.example.jsonl` is the smaller
-example. `--shard 0/2` and `--shard 1/2` split cases over two processes; use different
+`evals/tasks.agent.jsonl` contains 19 cases; `evals/tasks.example.jsonl` is the smaller
+example. Add `--delivery evals/delivery.evals.json` to give the agent the `run_checks`
+tool with a `tests` check, which the last case, `make-tests-pass`, is written for: it
+measures whether the model can make a failing test suite pass when it can run the tests
+itself, the skill the delivery stages depend on. `--shard 0/2` and `--shard 1/2` split cases over two processes; use different
 workspace, trace and checkpoint paths for each process. Each run's workspace is retained
 under its output folder for inspection. Failed or stopped runs always fail grading,
 even if their files satisfy an artifact-only check.
@@ -144,14 +147,14 @@ Otherwise:
 pip install -r requirements.txt
 
 python tests/test_harness.py      # 126 checks: tools, context, review evidence, MCP config, workers and budgets
-python tests/test_evals.py        # 5 checks: grading, failure scoring and effort comparison
-python tests/test_eval_cases.py   # 43 checks: task graders, reference solutions and near-misses
+python tests/test_evals.py        # 7 checks: grading, failure scoring, effort comparison and --delivery
+python tests/test_eval_cases.py   # 51 checks: task graders, reference solutions and near-misses
 python tests/test_app.py          # 34 checks: chat UI, pod manager, approvals and budget deadlines
-python tests/test_delivery.py     # 67 checks: delivery config, guarded tools, ADR lint, gate and stage runner (needs git)
+python tests/test_delivery.py     # 70 checks: delivery config, guarded tools, ADR lint, gate and all five stages (needs git)
 python tests/test_ui_browser.py   # 22 checks in Chrome, including the complete skill/worker/MCP flow
 ```
 
-The 275 non-browser checks passed locally on 28 November 2026 (Windows, Python 3.14);
+The 288 non-browser checks passed locally on 28 November 2026 (Windows, Python 3.14);
 the 22 browser checks last passed on 27 November 2026. Browser checks additionally need
 `pip install playwright` and installed Chrome or Chromium. Missing prerequisites produce
 a skip, not verification. If HTTPX rejects an IPv6 entry in your proxy exclusions, run
@@ -314,7 +317,10 @@ numbering and index, in the gate and as the `adr` check the model can run itself
 
 What to expect: one small feature per run (two to four files of about 150 lines each)
 at the 32K context; serve a 65,536 window and raise `AGENT_CONTEXT_BUDGET` for high
-effort and above. The cloud choice is a proposal from the plan's constraints, not from
+effort and above. Measure before you rely on it: run the eval set with
+`--delivery evals/delivery.evals.json` (see Effort levels) and look at the pass rate of
+`make-tests-pass` per effort level; a model that cannot make one failing test pass with
+the test runner in hand will not complete a build stage either. The cloud choice is a proposal from the plan's constraints, not from
 prices or accounts, and deployment belongs to the CI job with OIDC and a protected
 environment, never to the agent. The model's capability on real repositories is
 unmeasured: the evals are small single-folder tasks, so run a dry run against a
@@ -408,7 +414,7 @@ stop the GPU or cap rental spending: export results and stop the pod yourself.
 - **Live coverage remains limited.** The graph-enabled B300 revalidation passed the
   scoped skill/worker/MCP workflow with strict independent review, plus four selected
   cases at low/medium. Failed eager baselines are preserved; this is not the full
-  18-case benchmark. Run the smoke test and your own evals before deployment.
+  19-case benchmark. Run the smoke test and your own evals before deployment.
 - **Most serving/thinking presets remain untested live.** Only the DeepSeek V4-Flash
   0731 configuration above had live protocol/thinking probes. Gemma, Mistral, V4.1,
   larger contexts and max-thinking configurations still need deployment-specific tests.

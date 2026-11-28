@@ -35,9 +35,10 @@ def graded(case_id: str, solved: bool = True, **changes: str) -> tuple[bool, str
         for path, content in case["files"].items():
             ac.put(root, path, content)
         answer = case["solve"](root) if solved else ""
-        for path, content in changes.items():
-            ac.put(root, path.replace("__", "/").replace("_dot_", "."), content)
-        run = subprocess.run([sys.executable, "-c", case["check_py"]], cwd=root, input=answer,
+        for path, content in changes.items():      # keyword-safe names, or literal paths
+            literal = "/" in path or "." in path
+            ac.put(root, path if literal else path.replace("__", "/").replace("_dot_", "."), content)
+        run = subprocess.run([sys.executable, "-I", "-c", case["check_py"]], cwd=root, input=answer,
                              text=True, capture_output=True, timeout=60)
     return run.returncode == 0, (run.stderr or run.stdout).strip()[-160:]
 
@@ -89,6 +90,33 @@ wrong = {
             f"{pid},{kg:.2f}\n" for pid, kg in reversed(ac.WEIGHTS))}),
     "top-customers: cancelled orders counted": ("top-customers", {
         "out__top3_dot_csv": "name,total\nStark,2700.00\nNorthwind,2304.25\nHooli,1512.00\n"}),
+    "make-tests-pass: passing by editing the test": ("make-tests-pass", {
+        "test_money_dot_py": "print('all tests passed')\n"}),
+    "make-tests-pass: remainder given to the last shares": ("make-tests-pass", {
+        "calc__money_dot_py": ac.MONEY_FIXED.replace(
+            "[share + 1] * extra + [share] * (people - extra)",
+            "[share] * (people - extra) + [share + 1] * extra")}),
+    "make-tests-pass: answers hardcoded for the tested inputs": ("make-tests-pass", {
+        "calc__money_dot_py": "def split_bill(total_cents, people):\n"
+                              "    if people < 1:\n        raise ValueError('people')\n"
+                              "    known = {(900, 3): [300, 300, 300], (1000, 3): [334, 333, 333],\n"
+                              "             (12345, 7): [1764, 1764, 1764, 1764, 1763, 1763, 1763]}\n"
+                              "    return known.get((total_cents, people), [total_cents // people] * people)\n"}),
+    "make-tests-pass: the guard against zero people left out": ("make-tests-pass", {
+        "calc__money_dot_py": ac.MONEY_FIXED.replace(
+            "    if people < 1:\n        raise ValueError(\"people must be at least 1\")\n", "")}),
+    "make-tests-pass: the fix hidden in the package init, the module left broken": ("make-tests-pass", {
+        "calc/money.py": ac.MONEY_BUGGY,
+        "calc/__init__.py": "from . import money\n\n\ndef _fixed(total_cents, people):\n"
+                            "    if people < 1:\n        raise ValueError('people')\n"
+                            "    share, extra = divmod(total_cents, people)\n"
+                            "    return [share + 1] * extra + [share] * (people - extra)\n\n\n"
+                            "money.split_bill = _fixed\n"}),
+    "make-tests-pass: a fake subprocess module planted beside the code": ("make-tests-pass", {
+        "calc__money_dot_py": ac.MONEY_FIXED.replace(
+            "    if people < 1:\n        raise ValueError(\"people must be at least 1\")\n", ""),
+        "subprocess.py": "class _Done:\n    returncode = 0\n    stdout = stderr = ''\n\n\n"
+                         "def run(*args, **kwargs):\n    return _Done()\n"}),
 }
 for name, (case_id, changes) in wrong.items():
     passed, _ = graded(case_id, **changes)
@@ -110,6 +138,12 @@ fine = {
         "answers_dot_json": json.dumps({k: str(v) for k, v in ac.HANDBOOK_ANSWERS.items()})}),
     "handbook: the office named the way its heading is": ("handbook", {
         "answers_dot_json": json.dumps({**ac.HANDBOOK_ANSWERS, "q4": "Austin office"})}),
+    "make-tests-pass: a loop instead of divmod": ("make-tests-pass", {
+        "calc__money_dot_py": "def split_bill(total_cents, people):\n"
+                              "    if people < 1:\n        raise ValueError('people must be at least 1')\n"
+                              "    shares = [total_cents // people] * people\n"
+                              "    for i in range(total_cents - sum(shares)):\n        shares[i] += 1\n"
+                              "    return shares\n"}),
 }
 for name, (case_id, changes) in fine.items():
     passed, why = graded(case_id, **changes)
@@ -122,7 +156,7 @@ check("schedule: every valid plan is accepted",
 exported = (ROOT / "evals" / "tasks.agent.jsonl").read_text()
 loaded = [json.loads(line) for line in exported.splitlines()]
 check("tasks.agent.jsonl is up to date and complete",
-      exported == ac.export() and len(loaded) == 18 and len({c["id"] for c in loaded}) == 18
+      exported == ac.export() and len(loaded) == 19 and len({c["id"] for c in loaded}) == 19
       and all(set(c) == {"id", "task", "files", "check_py"} for c in loaded),
       "run: python evals/agent_cases.py")
 

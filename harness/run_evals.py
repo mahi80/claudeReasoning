@@ -1,13 +1,19 @@
 """run_evals.py - replay a fixed task set and score it from the workspace and the trace.
 
 Usage: AGENT_WORKSPACE=/tmp/eval-workspace python run_evals.py tasks.jsonl [repeats]
-           [--effort low medium high ...] [--shard 0/3]
+           [--effort low medium high ...] [--shard 0/3] [--delivery CONFIG]
 Each line of tasks.jsonl is a JSON object with the keys:
   id, task, files (optional: {path: text}), and check (a shell command) or check_py
   (Python source)
 The check runs in the workspace with the agent's final answer on stdin; exit 0 = pass.
 evals/tasks.example.jsonl is a three-case sample; evals/tasks.agent.jsonl is the real set.
 Name several effort levels to see what each one buys: pass rate against tokens spent.
+--delivery loads an operator config (harness/delivery_tools.py; evals/delivery.evals.json
+is a ready-made one) and gives the agent its checks through run_checks, and nothing else:
+git tools in the config are not offered, since a case workspace is wiped per case. A check
+whose program is "python" runs with this interpreter; any other program must be on PATH.
+The config and its home folder must lie outside the eval workspace, and each check's argv
+must make sense in a fresh case workspace.
 """
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ from pathlib import Path
 import mini_harness as h
 
 
-def run_case(case: dict, effort: str = "medium") -> dict:
+def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None) -> dict:
     assert "eval" in h.WORKSPACE.name, "point AGENT_WORKSPACE at a dedicated eval folder"
     shutil.rmtree(h.WORKSPACE, ignore_errors=True)        # every case starts clean
     h.WORKSPACE.mkdir(parents=True)
@@ -31,12 +37,12 @@ def run_case(case: dict, effort: str = "medium") -> dict:
     offset = h.TRACE_FILE.stat().st_size if h.TRACE_FILE.exists() else 0
     started = time.time()
     try:
-        answer = h.run_agent(case["task"], h.orchestrator_system(), h.ORCHESTRATOR_TOOLS,
+        answer = h.run_agent(case["task"], h.orchestrator_system(), tools or h.ORCHESTRATOR_TOOLS,
                              effort=effort)
     except Exception as err:                  # one server error must not end the whole set
         answer = f"RUN FAILED: {type(err).__name__}: {err}"
     seconds = round(time.time() - started, 1)
-    command = [sys.executable, "-c", case["check_py"]] if "check_py" in case else case["check"]
+    command = [sys.executable, "-I", "-c", case["check_py"]] if "check_py" in case else case["check"]
     try:
         check = subprocess.run(command, shell="check_py" not in case, cwd=h.WORKSPACE,
                                input=answer, text=True, capture_output=True, timeout=120)
@@ -60,12 +66,29 @@ def run_case(case: dict, effort: str = "medium") -> dict:
             "why": "" if passed else why}
 
 
-def main(path: str, repeats: int = 1, effort: str = "medium", shard: str = "0/1") -> dict:
+def eval_tools(registered: list[str]) -> list[str]:
+    """Evals get the checks only: a case workspace is wiped per case and must never be committed."""
+    return h.ORCHESTRATOR_TOOLS + [name for name in registered if name == "run_checks"]
+
+
+def prepare_checks(config) -> None:
+    """Make the config's checks runnable here: this interpreter for 'python', every program present."""
+    for name, check in list(config.checks.items()):
+        argv = list(check.argv)
+        if argv[0] in ("python", "python3"):
+            argv[0] = sys.executable
+            config.checks[name] = type(check)(check.name, tuple(argv), check.timeout, check.env)
+        elif shutil.which(argv[0]) is None:
+            raise SystemExit(f"check {name}: {argv[0]} is not on PATH, so the agent could never run it")
+
+
+def main(path: str, repeats: int = 1, effort: str = "medium", shard: str = "0/1",
+         tools: list[str] | None = None) -> dict:
     lines = Path(path).read_text().splitlines()
     cases = [json.loads(line) for line in lines if line.strip()]
     part, parts = map(int, shard.split("/"))      # run every parts-th case, from case `part`
     cases = cases[part::parts]
-    rows = [run_case(c, effort) for c in cases for _ in range(repeats)]
+    rows = [run_case(c, effort, tools) for c in cases for _ in range(repeats)]
     calls = sum(r["tool_calls"] for r in rows) or 1
     report = {"effort": effort, "runs": len(rows),
               "pass_rate": round(sum(r["passed"] for r in rows) / len(rows), 3),
@@ -91,8 +114,23 @@ if __name__ == "__main__":
     cli.add_argument("--effort", nargs="+", choices=h.LADDER, default=["medium"])
     cli.add_argument("--shard", default="0/1", metavar="I/N",
                      help="run every Nth case starting at case I, to split a set over processes")
+    cli.add_argument("--delivery", default="", metavar="CONFIG",
+                     help="delivery config whose checks the agent may run through run_checks")
     args = cli.parse_args()
-    reports = [main(args.tasks, args.repeats, level, args.shard) for level in args.effort]
+    tools = None
+    if args.delivery:
+        import delivery_tools
+        registered = delivery_tools.register(args.delivery)
+        prepare_checks(delivery_tools.CONFIG)
+        tools = eval_tools(registered)
+        dropped = sorted(set(registered) - set(tools))
+        if dropped:
+            print(f"evals offer run_checks only; not given to the agent: {', '.join(dropped)}", file=sys.stderr)
+    try:
+        reports = [main(args.tasks, args.repeats, level, args.shard, tools) for level in args.effort]
+    finally:
+        if args.delivery:
+            delivery_tools.close()
     if len(reports) > 1:                      # the trade-off, one line per level
         print(f"{'effort':8}{'pass rate':>10}{'avg steps':>11}{'avg output tokens':>19}"
               f"{'avg reasoning chars':>21}{'avg seconds':>13}")

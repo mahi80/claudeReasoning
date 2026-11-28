@@ -194,7 +194,8 @@ def load_config(path: str) -> Config:
     if not isinstance(raw, dict) or set(raw) - {"home", "checks", "gate", "stage_gates", "git", "adr"}:
         raise ValueError("delivery config must be an object with only home, checks, gate, "
                          "stage_gates, git and adr")
-    home = outside_workspace(Path(str(raw.get("home", source.parent / "home"))), "home")
+    home = Path(str(raw.get("home", "home")))             # relative: next to the config, not the cwd
+    home = outside_workspace(home if home.is_absolute() else source.parent / home, "home")
     if not isinstance(raw.get("checks", {}), dict):
         raise ValueError("checks must be an object of name -> {argv, timeout, env}")
     checks = {name: _check(name, spec) for name, spec in raw.get("checks", {}).items()}
