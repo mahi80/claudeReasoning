@@ -33,6 +33,7 @@ not measured.
 | `skills-import` at `18af506` | 33 compact instruction-only imports: document, coding, cloud and agent-regression guidance; eight originals preserved, 41 skills total | Published branch, not merged into `main` |
 | `readme-progress` | This README handoff only | Documentation branch; runtime fixes below are not included |
 | `pod-lifecycle-fixes` at `0c93753` | Standalone pod lifecycle fixes, based on `main` without skills | [PR #5](https://github.com/mahi80/claudeReasoning/pull/5) open; 305/305 offline checks/tests passed; not merged |
+| `reviewer-evidence-checkpoints` at `d055fe8` | Read-only reviewer paging and checkpoint journals, based on `main` without skills or pod fixes | [PR #6](https://github.com/mahi80/claudeReasoning/pull/6) open; 323/323 offline checks/tests passed; not merged |
 
 The imported skills carry pinned provenance and license notices. Loader/provenance
 checks passed; no third-party executables, hooks, assets or dependencies were installed.
@@ -68,7 +69,9 @@ skills import and these uncommitted changes applied:
 The combined local `runtime-reliability` integration remains uncommitted and is not a
 remote branch. Individual concerns are being published as separate review PRs listed
 above, each based directly on `main` without the skills import. PR #5 contains only pod
-lifecycle source/tests; reviewer/checkpoint and eval/trace publication remain next.
+lifecycle source/tests; PR #6 contains reviewer paging and checkpoint journals. Eval/trace
+publication remains next. PR #6 changes the checkpoint format and requires fresh task
+runs for older checkpoint files; it does not introduce evidence retention or OS isolation.
 The local integration applied cleanly and preserved both bots' mock-model scenarios;
 there was no manual conflict resolution. Preserve both sets if a later integration
 conflicts in the shared mock endpoint. No runtime PR has been merged.
