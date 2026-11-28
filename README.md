@@ -379,6 +379,7 @@ that GPU, so it cannot decide its own start.
 | `AGENT_MCP_CONFIG` | unset | Operator-controlled JSON file of approved servers and tool allowlists |
 | `AGENT_DELIVERY_CONFIG` | unset | Operator-controlled JSON file of pre-approved checks, git dir, remote and base branch for `deliver.py` |
 | `AGENT_MAX_SECONDS` | `900` | Shared agent-execution deadline; `0` disables it |
+| `LLM_CALL_TIMEOUT` | `600` | Limit for one model call, in seconds (more than 0, at most 86400; checked when a run or the chat server starts); a call that reaches it raises `TimeoutError`, unless the run's own time limit came first, which stops the run at its time budget |
 | `AGENT_MAX_TOTAL_TOKENS` | `100000` | Shared model-token allowance, including workers and summaries; `0` disables it |
 | `AGENT_MAX_COST_USD` | `0` | Optional estimated model-token cost limit, not GPU rental |
 | `LLM_INPUT_USD_PER_MILLION`, `LLM_OUTPUT_USD_PER_MILLION` | `0` | Endpoint token prices; both must be positive when a cost cap is set |

@@ -73,6 +73,8 @@ web = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log
 web_thread = threading.Thread(target=web.run, daemon=True)
 web_thread.start()
 while not web.started:
+    if not web_thread.is_alive():
+        sys.exit("the chat server failed to start")
     time.sleep(0.05)
 
 shots = os.environ.get("SCREENSHOT_DIR")

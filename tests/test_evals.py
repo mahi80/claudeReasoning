@@ -49,6 +49,11 @@ checks = (rows["python-check"]["passed"] and rows["python-check"]["why"] == ""
           and all(r["seconds"] >= 0 and r["reasoning_chars"] == 0 for r in report["rows"]))
 print("PASS a check can be Python, and a failed check says why" if checks
       else f"FAIL a check can be Python, and a failed check says why  [{rows}]")
+outcomes_ok = (report["outcomes"] == {"pass": 4, "fail": 2, "invalid": 0, "timeout": 0, "assisted": 0}
+               and all(r["outcome"] == ("pass" if r["passed"] else "fail") for r in report["rows"])
+               and report["assisted_runs"] == 0)
+print("PASS real mock-model runs report complete outcome counts" if outcomes_ok
+      else f"FAIL real mock-model outcome counts  [{report['outcomes']}]")
 
 # the same task set at three effort levels: what each level buys, and what it costs
 import subprocess  # noqa: E402
@@ -140,6 +145,22 @@ except SystemExit as err:
     missing_program = "no-such-program-xyz" in str(err)
 print("PASS the shipped eval config runs here and evals offer run_checks only" if shipped_ok and missing_program
       else f"FAIL the shipped eval config runs here and evals offer run_checks only  [{tests_check} {code} {output[-200:]} {missing_program}]")
+assisted = run_evals.run_case({"id": "assisted", "task": "[scenario:basic] assisted eval",
+                              "check_py": "from pathlib import Path\nassert Path('notes/a.txt').read_text() == 'hello'"},
+                             assisted=True)
+assisted_ok = assisted["passed"] and assisted["outcome"] == "assisted" and assisted["assisted"]
+print("PASS operator-assisted mock-model success is labelled separately" if assisted_ok
+      else f"FAIL operator-assisted success  [{assisted}]")
+budget = run_evals.h.RunBudget(run_evals.h.EFFORTS["medium"])
+budget.deadline = run_evals.h.time.monotonic() - 1
+token = run_evals.h.BUDGET.set(budget)
+try:
+    expired = run_evals.run_case(artifact_case)
+finally:
+    run_evals.h.BUDGET.reset(token)
+deadline_ok = not expired["passed"] and expired["outcome"] == "timeout" and "time budget" in expired["why"]
+print("PASS an actual shared deadline stop is scored as timeout despite passing artifacts" if deadline_ok
+      else f"FAIL shared deadline outcome  [{expired}]")
 server.shutdown()
 sys.exit(0 if ok and checks and levels and failed_artifact and stopped_artifact and delivery_ok
-         and shipped_ok and missing_program else 1)
+         and shipped_ok and missing_program and outcomes_ok and assisted_ok and deadline_ok else 1)

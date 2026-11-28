@@ -4,6 +4,7 @@ Uses the mock model endpoint and a mock Runpod API. Run: python tests/test_app.p
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 for folder in ("harness", "tests", "app"):
@@ -44,8 +46,11 @@ with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
 web = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="error"))
-threading.Thread(target=web.run, daemon=True).start()
+web_thread = threading.Thread(target=web.run, daemon=True)
+web_thread.start()
 while not web.started:
+    if not web_thread.is_alive():
+        sys.exit("the chat server failed to start")
     time.sleep(0.05)
 BASE = f"http://127.0.0.1:{port}"
 STATE = mock_runpod.STATE
@@ -232,20 +237,17 @@ check("approval waits respect the task deadline and clear pending permission",
 budgeted.emit("done", "ok", last=True)
 queued = server.Run()
 queued.approval_lock.acquire()
-budget = server.h.RunBudget(server.h.EFFORTS["medium"])
-budget.deadline = time.monotonic() + 0.05
-token = server.h.BUDGET.set(budget)
 try:
-    try:
-        queued.ask("run_shell", {"command": "queued-command"})
-        stopped = False
-    except server.h.BudgetExceeded:
-        stopped = True
+    with patch.object(server.h, "time_left", side_effect=[0.001, server.h.BudgetExceeded("time budget")]) as deadline:
+        try:
+            queued.ask("run_shell", {"command": "queued-command"})
+            stopped = False
+        except server.h.BudgetExceeded:
+            stopped = True
 finally:
-    server.h.BUDGET.reset(token)
     queued.approval_lock.release()
 check("queued approvals cannot wait beyond the shared task deadline",
-      stopped and queued.pending_approval is None and not queued.events)
+      stopped and deadline.call_count == 2 and queued.pending_approval is None and not queued.events)
 previous_tokens = server.h.RUN_MAX_TOKENS
 server.h.RUN_MAX_TOKENS = 1
 try:
@@ -325,6 +327,21 @@ check("start timeout reported in the chat", "Run failed" in failed and "TimeoutE
 # 10. Runpod API key was sent on every call; model endpoint saw no malformed request
 check("Runpod calls authenticated", STATE["bad_auth"] == 0 and STATE["starts"] >= 3)
 check("no malformed model requests", not mock_llm.ERRORS, "; ".join(mock_llm.ERRORS))
+
+# 11. An invalid LLM_CALL_TIMEOUT stops the chat server at startup, before any pod is started
+async def start_once() -> None:
+    async with server.lifespan(server.app):
+        pass
+
+
+with patch.object(server.h, "CALL_TIMEOUT", 0.0):
+    try:
+        asyncio.run(start_once())
+        refused = ""
+    except ValueError as err:
+        refused = str(err)
+check("an invalid LLM_CALL_TIMEOUT stops the chat server at startup",
+      "LLM_CALL_TIMEOUT must be a positive number" in refused, refused)
 
 bad = [name for name, ok in results if not ok]
 print(f"\n{len(results) - len(bad)}/{len(results)} checks passed")

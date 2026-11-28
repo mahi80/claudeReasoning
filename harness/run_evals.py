@@ -14,49 +14,110 @@ git tools in the config are not offered, since a case workspace is wiped per cas
 whose program is "python" runs with this interpreter; any other program must be on PATH.
 The config and its home folder must lie outside the eval workspace, and each check's argv
 must make sense in a fresh case workspace.
+Each case runs under its own run id (eval-<case>-<effort>), so records another process
+writes to the same trace file cannot change its outcome. The report keeps only the type
+of a run or grader failure; the full reason goes to stderr.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from openai import APITimeoutError
+
 import mini_harness as h
 
 
-def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None) -> dict:
+def diagnose(case: dict, stage: str, err: BaseException) -> None:
+    """The full reason on stderr for the operator; the report keeps only the exception type."""
+    print(f"run_evals: {case.get('id', '?')}: {stage} failed: {type(err).__name__}: {str(err)[:300]}",
+          file=sys.stderr, flush=True)
+
+
+def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None,
+             assisted: bool = False) -> dict:
     assert "eval" in h.WORKSPACE.name, "point AGENT_WORKSPACE at a dedicated eval folder"
-    shutil.rmtree(h.WORKSPACE, ignore_errors=True)        # every case starts clean
-    h.WORKSPACE.mkdir(parents=True)
-    for path, text in case.get("files", {}).items():
-        h.write_file(path, text)
     offset = h.TRACE_FILE.stat().st_size if h.TRACE_FILE.exists() else 0
     started = time.time()
+    outcome, passed = "fail", False
+    # Its own run id tags every event of this case, so another process sharing the trace
+    # file cannot change the outcome; the checkpoint key is the same id, overwritten by repeats.
+    run_id = "eval-" + re.sub(r"[^A-Za-z0-9_.-]", "_", f"{case.get('id', 'case')}-{effort}")[:80]
+    token = h.RUN_ID.set(run_id)
     try:
-        answer = h.run_agent(case["task"], h.orchestrator_system(), tools or h.ORCHESTRATOR_TOOLS,
-                             effort=effort)
-    except Exception as err:                  # one server error must not end the whole set
-        answer = f"RUN FAILED: {type(err).__name__}: {err}"
+        shutil.rmtree(h.WORKSPACE, ignore_errors=True)
+        h.WORKSPACE.mkdir(parents=True)
+        for path, text in case.get("files", {}).items():
+            h.write_file(path, text)
+        granted = h.ORCHESTRATOR_TOOLS if tools is None else tools
+        answer = h.run_agent(case["task"], h.orchestrator_system(), granted, effort=effort)
+    except (TimeoutError, APITimeoutError) as err:
+        outcome, answer = "timeout", f"RUN FAILED: {type(err).__name__}"
+        diagnose(case, "run", err)
+    except Exception as err:
+        outcome, answer = "invalid", f"RUN FAILED: {type(err).__name__}"
+        diagnose(case, "run", err)
+    finally:
+        h.RUN_ID.reset(token)
     seconds = round(time.time() - started, 1)
-    command = [sys.executable, "-I", "-c", case["check_py"]] if "check_py" in case else case["check"]
-    try:
-        check = subprocess.run(command, shell="check_py" not in case, cwd=h.WORKSPACE,
-                               input=answer, text=True, capture_output=True, timeout=120)
-        passed, why = check.returncode == 0, (check.stderr or check.stdout)[-200:].strip()
-    except subprocess.TimeoutExpired:
-        passed, why = False, "the check timed out"
-    if answer.startswith(("RUN FAILED:", "Stopped at")):
-        passed, why = False, answer[:200]
-    with h.TRACE_FILE.open() as f:
-        f.seek(offset)
-        events = [json.loads(line) for line in f]
+    events, why = [], answer[:200]
+    if h.TRACE_FILE.exists():
+        try:
+            with h.TRACE_FILE.open(encoding="utf-8") as stream:
+                stream.seek(offset)
+                events = [json.loads(line) for line in stream]
+            # Records of another run are skipped; anything malformed still fails closed below.
+            events = [e for e in events if not (isinstance(e, dict) and isinstance(e.get("run"), str)
+                                                and e["run"] != run_id)]
+            for event in events:
+                if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+                    raise ValueError("invalid trace event")
+                if event["event"] == "model" and (
+                        not isinstance(event.get("agent"), str) or any(
+                            type(event.get(key)) is not int or event[key] < 0
+                            for key in ("output_tokens", "reasoning_chars"))):
+                    raise ValueError("invalid model metrics")
+                if event["event"] == "tool" and type(event.get("failed")) is not bool:
+                    raise ValueError("invalid tool metrics")
+                if event["event"] == "budget_limit" and any(
+                        not isinstance(event.get(key), str) for key in ("agent", "reason")):
+                    raise ValueError("invalid budget event")
+        except (OSError, ValueError):
+            events, outcome, why = [], "invalid", "RUN FAILED: invalid runtime trace"
+    if outcome == "fail":
+        if any(e["event"] == "budget_limit" and e.get("agent") == "main"
+               and e.get("reason") == "time budget" for e in events):
+            outcome = "timeout"
+        elif not answer.startswith(("RUN FAILED:", "Stopped at")):
+            try:
+                if "check_py" in case:
+                    compile(case["check_py"], "<eval grader>", "exec")
+                    command = [sys.executable, "-I", "-c", case["check_py"]]
+                else:
+                    command = case["check"]
+                check = subprocess.run(command, shell="check_py" not in case, cwd=h.WORKSPACE,
+                                       input=answer, text=True, capture_output=True, timeout=120)
+                passed = check.returncode == 0
+                outcome = "pass" if passed else "invalid" if check.returncode < 0 else "fail"
+                why = (check.stderr or check.stdout)[-200:].strip()
+                if check.returncode < 0:
+                    why = f"CHECK FAILED: grader terminated ({check.returncode})"
+            except subprocess.TimeoutExpired:
+                outcome, why = "timeout", "the check timed out"
+            except Exception as err:
+                outcome, why = "invalid", f"CHECK FAILED: {type(err).__name__}"
+                diagnose(case, "grader", err)
+    if passed and assisted:
+        outcome = "assisted"
     tools = [e for e in events if e["event"] == "tool"]
-    calls = [e for e in events if e["event"] == "model"]       # every agent in the run
-    return {"id": case["id"], "passed": passed,
+    calls = [e for e in events if e["event"] == "model"]
+    return {"id": case["id"], "passed": passed, "outcome": outcome, "assisted": assisted,
             "steps": sum(e["agent"] == "main" for e in calls),
             "output_tokens": sum(e["output_tokens"] for e in calls),
             "reasoning_chars": sum(e["reasoning_chars"] for e in calls),
@@ -83,25 +144,32 @@ def prepare_checks(config) -> None:
 
 
 def main(path: str, repeats: int = 1, effort: str = "medium", shard: str = "0/1",
-         tools: list[str] | None = None) -> dict:
+         tools: list[str] | None = None, assisted: bool = False) -> dict:
+    if repeats < 1:
+        raise ValueError("repeats must be positive")
+    part, parts = map(int, shard.split("/"))
+    if not 0 <= part < parts:
+        raise ValueError("shard must be I/N with 0 <= I < N")
     lines = Path(path).read_text().splitlines()
-    cases = [json.loads(line) for line in lines if line.strip()]
-    part, parts = map(int, shard.split("/"))      # run every parts-th case, from case `part`
-    cases = cases[part::parts]
-    rows = [run_case(c, effort, tools) for c in cases for _ in range(repeats)]
+    cases = [json.loads(line) for line in lines if line.strip()][part::parts]
+    rows = [run_case(c, effort, tools, assisted=assisted) for c in cases for _ in range(repeats)]
+    outcomes = {name: sum(r["outcome"] == name for r in rows)
+                for name in ("pass", "fail", "invalid", "timeout", "assisted")}
+    runs, denominator = len(rows), len(rows) or 1
     calls = sum(r["tool_calls"] for r in rows) or 1
-    report = {"effort": effort, "runs": len(rows),
-              "pass_rate": round(sum(r["passed"] for r in rows) / len(rows), 3),
-              "avg_steps": round(sum(r["steps"] for r in rows) / len(rows), 1),
+    report = {"effort": effort, "runs": runs, "outcomes": outcomes,
+              "assisted_runs": sum(r["assisted"] for r in rows),
+              "pass_rate": round(outcomes["pass"] / runs, 3) if runs else None,
+              "avg_steps": round(sum(r["steps"] for r in rows) / denominator, 1),
               "avg_output_tokens": round(
-                  sum(r["output_tokens"] for r in rows) / len(rows)),
+                  sum(r["output_tokens"] for r in rows) / denominator),
               "avg_reasoning_chars": round(
-                  sum(r["reasoning_chars"] for r in rows) / len(rows)),
-              "avg_seconds": round(sum(r["seconds"] for r in rows) / len(rows), 1),
+                  sum(r["reasoning_chars"] for r in rows) / denominator),
+              "avg_seconds": round(sum(r["seconds"] for r in rows) / denominator, 1),
               "tool_failure_rate": round(
                   sum(r["tool_failures"] for r in rows) / calls, 3),
               "step_limit_rate": round(
-                  sum(r["hit_step_limit"] for r in rows) / len(rows), 3),
+                  sum(r["hit_step_limit"] for r in rows) / denominator, 3),
               "rows": rows}
     print(json.dumps(report, indent=2))
     return report
@@ -116,6 +184,8 @@ if __name__ == "__main__":
                      help="run every Nth case starting at case I, to split a set over processes")
     cli.add_argument("--delivery", default="", metavar="CONFIG",
                      help="delivery config whose checks the agent may run through run_checks")
+    cli.add_argument("--assisted", action="store_true",
+                     help="mark these runs as operator-assisted; successful runs do not count as unassisted passes")
     args = cli.parse_args()
     tools = None
     if args.delivery:
@@ -127,7 +197,8 @@ if __name__ == "__main__":
         if dropped:
             print(f"evals offer run_checks only; not given to the agent: {', '.join(dropped)}", file=sys.stderr)
     try:
-        reports = [main(args.tasks, args.repeats, level, args.shard, tools) for level in args.effort]
+        reports = [main(args.tasks, args.repeats, level, args.shard, tools, assisted=args.assisted)
+                   for level in args.effort]
     finally:
         if args.delivery:
             delivery_tools.close()
@@ -135,6 +206,7 @@ if __name__ == "__main__":
         print(f"{'effort':8}{'pass rate':>10}{'avg steps':>11}{'avg output tokens':>19}"
               f"{'avg reasoning chars':>21}{'avg seconds':>13}")
         for r in reports:
-            print(f"{r['effort']:8}{r['pass_rate']:>10}{r['avg_steps']:>11}"
+            rate = r["pass_rate"] if r["pass_rate"] is not None else "n/a"
+            print(f"{r['effort']:8}{rate:>10}{r['avg_steps']:>11}"
                   f"{r['avg_output_tokens']:>19}{r['avg_reasoning_chars']:>21}"
                   f"{r['avg_seconds']:>13}")
