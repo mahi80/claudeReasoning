@@ -20,12 +20,59 @@ not measured. [Back to README](../README.md).
 | `eval-outcomes-trace` at `8711797` | Five-outcome eval reporting, per-process trace lock and regression tests, based on `main` without other runtime concerns | [PR #7](https://github.com/mahi80/claudeReasoning/pull/7) open; 313/313 offline checks/tests passed; not merged |
 | `main` at `c21cd17` | Offline test discovery/runner and Windows/Linux/browser CI, proposed by the other instance | [PR #8](https://github.com/mahi80/claudeReasoning/pull/8) merged; newest main CI run 46123741330 failed |
 | `skills-library` at `9f6fd43` | All 41 skills, bounded on-demand imported-library discovery and complete root NOTICE attribution, based directly on `main` | [PR #9](https://github.com/mahi80/claudeReasoning/pull/9) open; 307/307 offline checks/tests passed; not merged |
+| `coding-chat-cli` at `95cdfa6` | Shared verified coding executor, chat/local terminal interfaces, 39 scoped provider operations and mandatory single-tenant chat authentication | [PR #10](https://github.com/mahi80/claudeReasoning/pull/10) open; 369/369 local offline checks passed; CI blocked before execution by account billing lock; not merged |
 
 Main now also includes PR #8 at `c21cd17`; that merge was performed outside this instance.
 PRs #5–#7 and #9 remain open. Review each concern independently; do not merge the older
 `skills-import` branch instead of PR #9.
 The three runtime PRs and PR #9 are each based directly on `main` at `440c409` and do
 not inherit one another. Original worktrees and published branches remain intact.
+
+## Coding source publication — PR #10
+
+The implementation described in coding milestones 1–4 is now committed and pushed on
+`coding-chat-cli` at `95cdfa6712e72bbefac585e036b77dc763e2f5a1`, based on main
+`c21cd17`. [PR #10](https://github.com/mahi80/claudeReasoning/pull/10) is open against
+main, not merged. Statements below that the source was local/uncommitted describe
+those earlier milestones, not the current publication state. This documentation branch
+still contains no executable implementation changes.
+
+- Published 19 implementation, example-configuration and test files. No dependencies,
+  CI workflows, screenshots, live credentials or other worktrees were included.
+- Final local evidence remains **369/369 offline checks across ten scripts** on
+  Windows/Python 3.14.3, plus internal-browser fixture verification. The updated
+  Playwright/Chrome suite was not run locally. No live DeepSeek/H200/provider validation
+  was performed, and no GPU was provisioned or paid service used for this publication.
+- [CI run 46130972420](https://github.com/mahi80/claudeReasoning/actions/runs/46130972420)
+  failed before execution. Each of its four Linux/Windows/browser jobs had zero steps
+  and the annotation: "The job was not started because your account is locked due to a
+  billing issue." No CI tests ran; do not interpret this as green CI or a code test
+  failure. The account owner must resolve the billing lock before a rerun. No billing
+  changes, CI bypass or automatic retry were performed.
+- Mandatory chat authentication protects task ownership for trusted collaborators in
+  one shared repository/process; it is not tenant execution isolation. The CLI is local,
+  not a hosted authenticated terminal client. Durable tasks/results, cancellation,
+  isolated execution and fair ten-user/four-H200 inference scheduling remain pending.
+- Provider writes always need explicit operator approval, even with auto-approve, but
+  an approved write can occur during implementation before final coding checks/review.
+  Passing code acceptance never authorizes external writes. GitLab's head precheck and
+  per-file guard are not atomic whole-branch compare-and-swap.
+
+### Copyable independent-review handoff
+
+Review PR #10 at `95cdfa6`, without merging yet. Reproduce `python tests/run_offline.py`
+and inspect actual Linux/Windows/browser CI after the billing blocker is resolved.
+Try failed/missing/timed-out checks, empty reports, failed/unfinished reviews and shared
+budget exhaustion; none should become accepted coding results. Audit chat authentication,
+Origin/CSRF checks, session expiry/logout/replay, SSE revocation, and owner-only task
+streams/approval prompts. Audit all connector resource/argument scopes, redirect and
+credential handling, expected-SHA protections, unknown-write reporting/no retries,
+worker grants and write denial despite `AGENT_AUTO_APPROVE=1`. Report findings with
+severity and file/line evidence. Do not infer production readiness or model capacity
+from mocks. Require real green CI and resolution of review blockers before recommending
+merge; merging still needs the user's explicit approval. Do not implicitly merge PRs
+#5–#7 or #9, which this branch does not contain. Preserve both mock-model scenario blocks
+if later merges conflict.
 
 ## Coding product milestone 1 — shared executor
 
