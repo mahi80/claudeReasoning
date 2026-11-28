@@ -54,11 +54,54 @@ The existing worktrees remain untouched.
 - Focused validation: **12/12 coding executor tests passed**, including real file tools,
   scoped delegation, actual isolated Python check execution and fixture-model review;
   failing gates, review failures, budget stops, secret-safe exceptions and configuration
-  confinement are covered. Full current-main regressions are running separately.
+  confinement are covered. Subsequent regression results and fixes are recorded below.
 - Next milestone: wire chat coding mode and an interactive/one-shot terminal client to
   this executor, test HTTP/CLI and the in-app browser, then publish another handoff.
   The current app has no tenant authentication or container isolation and is not safe
   for public multi-user hosting.
+
+## Coding product milestone 2 — GitHub, GitLab and Jira connectors
+
+User approved these integrations after milestone 1. The implementation is local on
+`coding-chat-cli`, still uncommitted and unpublished; this documentation branch contains
+none of the executable changes. Main remains `c21cd17`; PRs #5–#7 and #9 remain open.
+
+- Added `harness/integrations.py` and an environment-name-only configuration example.
+  GitHub/GitLab support repository file reads, issues/comments, branches, multi-file
+  API commits, pull/merge requests, paged diffs, review/approval and explicit merging.
+  Jira uses REST v3 for project-scoped issues, ADF descriptions/comments and transitions.
+  GitLab approval is separate from GitHub's COMMENT/APPROVE/REQUEST_CHANGES review API.
+- Operators specify provider API bases, credential environment-variable names, exact
+  repositories/projects and a tool allowlist in an external configuration selected by
+  `AGENT_INTEGRATIONS_CONFIG`. No credentials or endpoints are chosen by the model.
+  Jira Cloud basic authentication uses a configured user environment variable; bearer
+  authentication is also available. No OAuth onboarding or live account connection exists.
+- Read tools run within their configured resource scope. Every write requires a distinct
+  operator approval, even with `AGENT_AUTO_APPROVE=1`; unattended writes fail closed.
+  Chat uses the existing per-prompt approval IDs. Terminal approval requires explicit
+  `yes`; noninteractive one-shot execution denies writes rather than hanging.
+- HTTP redirects are not followed; inherited proxy settings are not used. Credentials
+  are attached only to the configured provider client and are excluded from tool schemas,
+  model arguments and provider-error text. Provider failures do not automatically retry
+  writes; partial/unknown outcomes require inspecting provider state first.
+- Merges and reviews pin an expected commit SHA. GitHub commit publication is non-force
+  and parent-pinned. GitLab checks the branch head and guards existing files with their
+  last-commit IDs; this is not an atomic compare-and-swap of the entire GitLab branch.
+  The connectors publish supplied UTF-8 file content through APIs, not arbitrary git
+  shell commands; binary uploads, clones, rebases and force-push are not implemented.
+- **24/24 connector unittest methods passed**, covering all 39 supported operations with
+  mocked transports, approval denial/allow, auto-approval bypass prevention, exact scopes,
+  argument/path/ref validation, authentication, redirect refusal, safe errors, pagination,
+  expected-head guards, no force push, Jira ADF and shared deadlines. These are not live
+  provider or GPU tests, and service-specific account policies remain unvalidated.
+- Both interfaces are wired to these configured tools: focused terminal **10/10** and
+  coding HTTP **12/12** tests pass. Browser accepted/rejected and approval/denial flows
+  have been exercised with local fixtures; the complete regression rerun and final
+  browser handoff are the next milestone.
+
+No dependency was installed, no account was connected, no real issue/request was changed,
+no GPU was provisioned and no new daily user quota was introduced. Configurations are
+process-level, not tenant identities; this remains unsafe for public multi-user hosting.
 
 ## Skills cost and license milestone
 
