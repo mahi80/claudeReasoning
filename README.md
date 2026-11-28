@@ -32,6 +32,7 @@ not measured.
 | `main` at `440c409` | PR #4: 19th `make-tests-pass` eval, `--delivery` checks without git tools, isolated Python graders, pipeline/quality stage tests | Merged |
 | `skills-import` at `18af506` | 33 compact instruction-only imports: document, coding, cloud and agent-regression guidance; eight originals preserved, 41 skills total | Published branch, not merged into `main` |
 | `readme-progress` | This README handoff only | Documentation branch; runtime fixes below are not included |
+| `pod-lifecycle-fixes` at `0c93753` | Standalone pod lifecycle fixes, based on `main` without skills | [PR #5](https://github.com/mahi80/claudeReasoning/pull/5) open; 305/305 offline checks/tests passed; not merged |
 
 The imported skills carry pinned provenance and license notices. Loader/provenance
 checks passed; no third-party executables, hooks, assets or dependencies were installed.
@@ -64,11 +65,13 @@ skills import and these uncommitted changes applied:
   still need separate trace paths. The queued-approval deadline test now simulates
   expiry deterministically; runtime approval behavior was not changed.
 
-These runtime changes are **not fetchable from GitHub yet**. Do not assume a remote
-`runtime-reliability` branch exists or that the documentation branch implements them.
+The combined local `runtime-reliability` integration remains uncommitted and is not a
+remote branch. Individual concerns are being published as separate review PRs listed
+above, each based directly on `main` without the skills import. PR #5 contains only pod
+lifecycle source/tests; reviewer/checkpoint and eval/trace publication remain next.
 The local integration applied cleanly and preserved both bots' mock-model scenarios;
 there was no manual conflict resolution. Preserve both sets if a later integration
-conflicts in the shared mock endpoint. Runtime commit, push and merge are still pending.
+conflicts in the shared mock endpoint. No runtime PR has been merged.
 
 ### Verification and next work
 
