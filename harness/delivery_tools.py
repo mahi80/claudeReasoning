@@ -21,9 +21,10 @@ What keeps the model away from credentials and from code execution through git:
   does not exist, and command-line settings that pin protocol, redirects, proxy, ignore
   and attribute files; before every call the configuration git would read is scanned,
   and a push, redirect or code-running key from any file refuses the operation;
-- the push goes to the configured URL only (a rewritten URL is refused), the token
-  reaches git only through harness/git_credential.py, which answers for that host over
-  https alone, and git_push_pr is the only tool that needs an approval click.
+- the push goes to the configured URL only (a rewritten URL, a remote named by a URL
+  and any push URL are refused), the token reaches git only through
+  harness/git_credential.py, which answers for that host over https alone, and
+  git_push_pr is the only tool that needs an approval click.
 Checks still run as the same user as the harness: on a host that is not disposable,
 run them under another user or in a container. See harness/deliver.py for the stages.
 """
@@ -297,11 +298,12 @@ def hardening(config: Config) -> list[str]:
     git, state = config.git, git_state(config)
     empty, local = state / "gitconfig", not config.git.remote.startswith("https://")
     flags = ["-c", f"core.hooksPath={state / ('no-hooks-' + uuid.uuid4().hex)}",   # never exists
-             "-c", "core.fsmonitor=false", "-c", f"core.excludesFile={empty}",
-             "-c", f"core.attributesFile={empty}", "-c", "commit.gpgsign=false",
-             "-c", "tag.gpgsign=false", "-c", "gc.auto=0", "-c", "protocol.allow=never",
-             "-c", f"protocol.{'file' if local else 'https'}.allow=always",
+             "-c", "core.fsmonitor=",             # empty: unset on old git, false on new git
+             "-c", f"core.excludesFile={empty}", "-c", f"core.attributesFile={empty}",
+             "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "gc.auto=0",
+             "-c", "protocol.allow=never", "-c", f"protocol.{'file' if local else 'https'}.allow=always",
              "-c", "http.followRedirects=false", "-c", "http.proxy=", "-c", "http.sslVerify=true",
+             "-c", "push.recurseSubmodules=no", "-c", "submodule.recurse=false",
              "-c", f"user.name={git.author_name}", "-c", f"user.email={git.author_email}"]
     for key, value in git.config:                  # the operator's own settings, trusted
         flags += ["-c", f"{key}={value}"]
@@ -330,11 +332,20 @@ def config_problems(config: Config, timeout: float = 60) -> list[str]:
     problems = []
     for line in listing.stdout.splitlines():
         origin, _, key = line.partition("\t")
-        if origin.startswith("command line") or not UNSAFE_CONFIG.match(key):
+        if origin.startswith("command line") or not (UNSAFE_CONFIG.match(key) or _unsafe_remote(config, key)):
             continue
         problems.append(f"git setting {key} in {origin} could redirect a push or run a program; "
                         "remove it, or put it in the delivery config under git.config")
     return problems
+
+
+def _unsafe_remote(config: Config, key: str) -> bool:
+    """A remote named by a URL, or any push URL: `git push <url>` would follow them instead."""
+    section, _, rest = key.partition(".")
+    if section.lower() != "remote" or "." not in rest:
+        return False
+    name, _, setting = rest.rpartition(".")
+    return setting.lower() == "pushurl" or "/" in name or ":" in name or name == config.git.remote
 
 
 def excludes() -> list[str]:
@@ -567,8 +578,7 @@ def _push(config: Config, branch: str, title: str, body: str, token: str) -> str
     pushed = run_git(config, ["-c", "credential.helper=", "-c", f"credential.helper={credential_helper()}",
                               "push", "--no-verify", "--", git.remote,
                               f"refs/heads/{branch}:refs/heads/{branch}"],
-                     timeout=time_left(300),
-                     extra_env={"DELIVERY_TOKEN": token, "DELIVERY_HOST": host, "DELIVERY_PROTOCOL": "https"})
+                     timeout=time_left(300), extra_env={"DELIVERY_TOKEN": token, "DELIVERY_HOST": host})
     if pushed.returncode:
         return (f"ERROR: push failed (exit {pushed.returncode}):\n"
                 f"{redact(pushed.stdout + pushed.stderr, token).strip()}")

@@ -109,7 +109,7 @@ def changed_since(base: str, folder: str, git_dir: str = "", work_tree: str = ""
                "GIT_TERMINAL_PROMPT": "0"}
         git = (["git"] + ([f"--git-dir={git_dir}"] if git_dir else [])
                + ([f"--work-tree={work_tree}"] if work_tree else [])
-               + ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={Path(tmp) / 'no-hooks'}"])
+               + ["-c", "core.fsmonitor=", "-c", f"core.hooksPath={Path(tmp) / 'no-hooks'}"])
 
         def run(*args: str) -> list[str]:
             done = subprocess.run(git + list(args), capture_output=True, text=True, timeout=60, env=env)

@@ -292,6 +292,18 @@ check("a URL rewrite in the repository's git config stops every git command and 
       refused_commit.startswith("ERROR: git configuration refused:") and "url.http://evil.example/.insteadof" in refused_commit
       and len(refused_gate) == 1 and "insteadof" in refused_gate[0]
       and git("status", "--porcelain", "--", "tamper.txt").stdout == "", f"{refused_commit} | {refused_gate}")
+verdicts = {}
+for label, block in {
+        "url-named remote": '[remote "https://github.com/o/r.git"]\n\turl = https://github.com/o/r.git\n',
+        "push url": '[remote "origin"]\n\turl = https://github.com/o/r.git\n\tpushurl = https://evil.example/x.git\n',
+        "plain nickname": '[remote "origin"]\n\turl = https://github.com/o/r.git\n'}.items():
+    repo_config.write_text(original_config + block)
+    verdicts[label] = dt.config_problems(dt.CONFIG)
+repo_config.write_text(original_config)
+check("a remote named by a URL or carrying a push URL is refused; an ordinary remote is not",
+      len(verdicts["url-named remote"]) == 1 and "remote.https://github.com/o/r.git.url" in verdicts["url-named remote"][0]
+      and len(verdicts["push url"]) == 1 and "pushurl" in verdicts["push url"][0] and verdicts["plain nickname"] == [],
+      str(verdicts))
 
 wrong_branch = dt.git_problems(dt.CONFIG, "feature/unit")
 (workspace / "dirty.txt").write_text("d\n")
@@ -357,7 +369,7 @@ with patch.object(dt, "run_git", fake_run_git), \
 args, env = pushes[0]
 check("an https push uses the credential helper, keeps the token out of argv and opens the pull request",
       opened == "pushed feature/other and opened the pull request: https://github.com/o/r/pull/7"
-      and env == {"DELIVERY_TOKEN": "t0ken-secret", "DELIVERY_HOST": "github.com", "DELIVERY_PROTOCOL": "https"}
+      and env == {"DELIVERY_TOKEN": "t0ken-secret", "DELIVERY_HOST": "github.com"}
       and args[:3] == ["-c", "credential.helper=", "-c"] and args[3].startswith("credential.helper=!")
       and " -I -S " in args[3] and "git_credential.py" in args[3] and "--no-verify" in args
       and "t0ken-secret" not in " ".join(args) and args[-1] == "refs/heads/feature/other:refs/heads/feature/other"

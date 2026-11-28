@@ -147,11 +147,11 @@ python tests/test_harness.py      # 126 checks: tools, context, review evidence,
 python tests/test_evals.py        # 5 checks: grading, failure scoring and effort comparison
 python tests/test_eval_cases.py   # 43 checks: task graders, reference solutions and near-misses
 python tests/test_app.py          # 34 checks: chat UI, pod manager, approvals and budget deadlines
-python tests/test_delivery.py     # 66 checks: delivery config, guarded tools, ADR lint, gate and stage runner (needs git)
+python tests/test_delivery.py     # 67 checks: delivery config, guarded tools, ADR lint, gate and stage runner (needs git)
 python tests/test_ui_browser.py   # 22 checks in Chrome, including the complete skill/worker/MCP flow
 ```
 
-The 274 non-browser checks passed locally on 28 November 2026 (Windows, Python 3.14);
+The 275 non-browser checks passed locally on 28 November 2026 (Windows, Python 3.14);
 the 22 browser checks last passed on 27 November 2026. Browser checks additionally need
 `pip install playwright` and installed Chrome or Chromium. Missing prerequisites produce
 a skip, not verification. If HTTPX rejects an IPv6 entry in your proxy exclusions, run
