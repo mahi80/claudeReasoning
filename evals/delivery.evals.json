@@ -1,0 +1,6 @@
+{
+  "home": "eval-home",
+  "checks": {
+    "tests": {"argv": ["python", "-I", "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"], "timeout": 120}
+  }
+}

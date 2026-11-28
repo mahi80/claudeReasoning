@@ -1,4 +1,4 @@
-"""agent_cases.py - the agent eval set: 18 tasks that need care, not just a tool call.
+"""agent_cases.py - the agent eval set: 19 tasks that need care, not just a tool call.
 
 Each case is a task, the files it starts from, and a check written in Python. The check
 runs in the workspace with the agent's final answer on stdin and exits 0 for a pass.
@@ -7,8 +7,10 @@ reference solution, so tests/test_eval_cases.py can prove that each check passes
 correct result and fails on the untouched files.
 
 The agent needs no shell command that changes anything: the file tools and the
-read-only commands are enough. The checks do run code the agent edited, so run the set
-in a throwaway workspace.
+read-only commands are enough. The last case is also meant to be run with the delivery
+tools (`run_evals.py --delivery evals/delivery.evals.json`), so the agent can run the
+tests itself. The checks do run code the agent edited, so run the set in a throwaway
+workspace.
 
     python evals/agent_cases.py        # rewrite evals/tasks.agent.jsonl from this file
 """
@@ -780,6 +782,77 @@ for (name, total), (want_name, want_total) in zip(rows[1:], want):
 ''',
      writes("out/top3.csv", "name,total\n" + "".join(
          f"{name},{total:.2f}\n" for name, total in TOP3)))
+
+# ---------------------------------------------------------------- 19. make the tests pass, test runner at hand
+MONEY_BUGGY = '''"""Split a bill into whole-cent shares."""
+
+
+def split_bill(total_cents, people):
+    """Return `people` shares that add up to total_cents, the larger shares first,
+    no two shares more than one cent apart."""
+    share = total_cents // people
+    return [share] * people
+'''
+MONEY_FIXED = MONEY_BUGGY.replace(
+    "    share = total_cents // people\n    return [share] * people\n",
+    "    if people < 1:\n        raise ValueError(\"people must be at least 1\")\n"
+    "    share, extra = divmod(total_cents, people)\n"
+    "    return [share + 1] * extra + [share] * (people - extra)\n")
+MONEY_TEST = '''import unittest
+
+from calc.money import split_bill
+
+
+class SplitBillTests(unittest.TestCase):
+    def test_even_split(self):
+        self.assertEqual(split_bill(900, 3), [300, 300, 300])
+
+    def test_remainder_goes_to_the_first_shares(self):
+        self.assertEqual(split_bill(1000, 3), [334, 333, 333])
+
+    def test_total_is_preserved(self):
+        self.assertEqual(sum(split_bill(12345, 7)), 12345)
+
+    def test_shares_differ_by_at_most_one_cent(self):
+        shares = split_bill(12345, 7)
+        self.assertLessEqual(max(shares) - min(shares), 1)
+
+    def test_rejects_no_people(self):
+        with self.assertRaises(ValueError):
+            split_bill(100, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+MONEY_EXTRA = [((1, 3), [1, 0, 0]), ((7, 1), [7]), ((2, 5), [1, 1, 0, 0, 0]),
+               ((100, 4), [25, 25, 25, 25])]          # inputs the tests do not mention
+case("make-tests-pass",
+     "test_money.py fails. Fix calc/money.py so that every test passes; do not edit "
+     "test_money.py. If the run_checks tool is available, run the check named tests after "
+     "each change until it passes; otherwise reason from the code. Finish by saying what "
+     "was wrong.",
+     {"calc/__init__.py": "", "calc/money.py": MONEY_BUGGY, "test_money.py": MONEY_TEST},
+     f'''unchanged("test_money.py", "{sha(MONEY_TEST)}")
+unchanged("calc/__init__.py", "{sha('')}")
+run = subprocess.run([sys.executable, "-I", "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"],
+                     capture_output=True, text=True, timeout=60)      # -I: no module planted beside the code
+if run.returncode:
+    sys.exit(run.stderr[-300:])
+sys.path.insert(0, ".")
+from calc.money import split_bill
+for args, want in {MONEY_EXTRA!r}:
+    got = split_bill(*args)
+    if got != want:
+        sys.exit(f"split_bill{{args}} gave {{got}}, expected {{want}}")
+try:
+    split_bill(100, 0)
+except ValueError:
+    pass
+else:
+    sys.exit("split_bill(100, 0) did not raise ValueError")
+''',
+     writes("calc/money.py", MONEY_FIXED))
 
 
 def export() -> str:

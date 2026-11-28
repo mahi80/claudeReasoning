@@ -7,6 +7,7 @@ node_modules/
 workspace/
 checkpoints/
 trace.jsonl
+eval-home/
 
 # intermediate files of the document build
 docs/build/out/

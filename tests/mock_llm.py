@@ -328,6 +328,61 @@ def policy(body: dict) -> dict:
         if acted == 5:
             return {"calls": [("git_commit", j({"branch": branch, "message": "Add calc"}))]}
         return {"text": "CONFIRMED" if confirmed else f"DONE: build {last[0][:30]}"}
+    if scenario == "delivery_eval":       # an eval case that runs the configured check until it passes
+        if not acted:
+            return {"calls": [("run_checks", j({"name": "tests", "reason": "first run"}))]}
+        if acted == 1:
+            return {"calls": [("write_file", j({"path": "ok.txt", "content": "ok"}))]}
+        if acted == 2:
+            return {"calls": [("run_checks", j({"name": "tests", "reason": "after the fix"}))]}
+        return {"text": "DONE: " + last[0].splitlines()[0]}
+    if scenario == "delivery_pipeline":   # pipeline stage: ci.yml, and the ADR once the gate asked for it
+        branch = re.search(r"on branch (\S+)", task).group(1).rstrip(".")
+        seen = [m["content"] for m in msgs if m["role"] == "tool"]
+        report = seen[0] if seen else ""
+        ci = ("name: ci\non:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  test:\n"
+              "    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
+              "      - run: python -m unittest\n")
+        adr = ("# 0002. Pipeline: GitHub Actions with a gated deploy\nStatus: Proposed\nDate: 2026-11-28\n\n"
+               "## Context\nOne repository, one team.\n\n## Decision\nGitHub Actions runs the tests on every "
+               "pull request; deploys run only from main.\n\n## Consequences\nSecrets live in GitHub.\n\n"
+               "## Alternatives considered\nJenkins: more to run.\n\n## Assumptions to confirm\n"
+               "- [ ] Actions minutes are available\n")
+        steps = [("read_file", j({"path": ".agent/gate-report.md"})), ("load_skill", j({"name": "github-actions"})),
+                 ("write_file", j({"path": ".github/workflows/ci.yml", "content": ci}))]
+        if "no record" in report:         # the previous attempt was rejected for the missing ADR
+            steps += [("write_file", j({"path": "docs/adr/0002-github-actions-pipeline.md", "content": adr})),
+                      ("edit_file", j({"path": "docs/adr/README.md", "old_text": "# Decisions\n",
+                                       "new_text": "# Decisions\n- [0002](0002-github-actions-pipeline.md) "
+                                                   "Pipeline (Proposed)\n"}))]
+        steps += [("write_file", j({"path": ".agent/pr.md", "content": "Add the CI pipeline\n\nTests on every pull request.\n"})),
+                  ("git_commit", j({"branch": branch, "message": "Add the GitHub Actions pipeline"}))]
+        if acted < len(steps):
+            return {"calls": [steps[acted]]}
+        return {"text": "CONFIRMED" if confirmed else f"DONE: pipeline {last[0][:30]}"}
+    if scenario == "delivery_quality":    # quality stage: project file, gated job, tests, ADR, commit
+        branch = re.search(r"on branch (\S+)", task).group(1).rstrip(".")
+        props = "sonar.projectKey=demo_calc\nsonar.sources=.\nsonar.tests=.\nsonar.test.inclusions=**/test_*.py\n"
+        adr = ("# 0003. Quality gate thresholds\nStatus: Proposed\nDate: 2026-11-28\n\n## Context\nSonarQube runs "
+               "in CI.\n\n## Decision\nNew code needs 80 percent coverage, at most 3 percent duplication and no "
+               "new blocker.\n\n## Consequences\nA red gate blocks the merge.\n\n## Alternatives considered\n"
+               "No gate: slower reviews.\n\n## Assumptions to confirm\n- [ ] A SonarCloud organisation exists\n")
+        steps = [("load_skill", j({"name": "sonarqube"})), ("read_file", j({"path": ".github/workflows/ci.yml"})),
+                 ("write_file", j({"path": "sonar-project.properties", "content": props})),
+                 ("edit_file", j({"path": ".github/workflows/ci.yml", "old_text": "jobs:\n",
+                                  "new_text": "jobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n"
+                                              "      - uses: actions/checkout@v4\n"
+                                              "      - run: sonar-scanner -Dsonar.qualitygate.wait=true\n"})),
+                 ("write_file", j({"path": "docs/adr/0003-quality-gate-thresholds.md", "content": adr})),
+                 ("edit_file", j({"path": "docs/adr/README.md", "old_text": "# Decisions\n",
+                                  "new_text": "# Decisions\n- [0003](0003-quality-gate-thresholds.md) Quality gate "
+                                              "thresholds (Proposed)\n"})),
+                 ("run_checks", j({"name": "tests", "reason": "before committing"})),
+                 ("write_file", j({"path": ".agent/pr.md", "content": "Add the SonarQube quality gate\n\nThresholds in ADR 0003.\n"})),
+                 ("git_commit", j({"branch": branch, "message": "Add the SonarQube quality gate"}))]
+        if acted < len(steps):
+            return {"calls": [steps[acted]]}
+        return {"text": "CONFIRMED" if confirmed else f"DONE: quality {last[0][:30]}"}
     if scenario == "delivery_worker":     # a worker may be granted the pre-approved checks
         if not acted:
             return {"calls": [("spawn_agent", j({"task": "[scenario:delivery_worker_sub] run the tests",

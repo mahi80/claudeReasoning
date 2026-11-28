@@ -498,6 +498,38 @@ check("--push-only refuses a protected branch and a branch that is not ready",
       and deliver.main(["--push-only", "--branch", "feature/unit", "--result", str(result)]) == 4
       and "not ready" in json.loads(result.read_text())["push"])
 deliver.console_operator = lambda name, args: False
+
+code = deliver.main(["--stage", "pipeline", "--branch", "feature/calc", "--run-id", "pipeline-1", "--result", str(result),
+                     "--note", "[scenario:delivery_pipeline]"])
+report = json.loads(result.read_text())
+gates = events("gate", "pipeline-1")
+pipeline_tools = events("tool", "pipeline-1")
+check("the pipeline stage is rejected without its ADR, then accepted once the agent records the decision",
+      code == 0 and report["status"] == "accepted" and [g["passed"] for g in gates] == [False, True]
+      and [(i["name"], i["ok"]) for i in gates[0]["items"]] == [("ci-workflow", True), ("git", True), ("adr", False)]
+      and all(i["ok"] for i in report["gate"]["items"]) and report["effort"]["reached"] == "high"
+      and (workspace / ".github" / "workflows" / "ci.yml").exists()
+      and (workspace / "docs" / "adr" / "0002-github-actions-pipeline.md").exists()
+      and [e["failed"] for e in pipeline_tools if e["tool"] == "read_file"] == [True, False]
+      and not any(e["failed"] for e in pipeline_tools if e["tool"] in ("load_skill", "edit_file", "git_commit"))
+      and not list((dt.git_state(cfg) / "stages").glob("pipeline--*")), json.dumps(report)[:400])
+check("the second attempt read the report and committed only the missing record; the tree is clean",
+      git("log", "--format=%s", "-2").stdout.splitlines() == ["Add the GitHub Actions pipeline"] * 2
+      and git("show", "--name-only", "--format=", "HEAD").stdout.split()
+      == ["docs/adr/0002-github-actions-pipeline.md", "docs/adr/README.md"]
+      and git("status", "--porcelain", "--", ".", *dt.excludes()).stdout.strip() == "")
+code = deliver.main(["--stage", "quality", "--branch", "feature/calc", "--run-id", "quality-1", "--result", str(result),
+                     "--stop", "medium", "--note", "[scenario:delivery_quality]"])
+report = json.loads(result.read_text())
+check("the quality stage is accepted in one attempt: project file, gated job, passing tests and its ADR",
+      code == 0 and report["status"] == "accepted" and report["effort"]["reached"] == "medium"
+      and [(i["name"], i["ok"]) for i in report["gate"]["items"]] == [("sonar-project", True), ("git", True),
+                                                                      ("tests", True), ("generated", True), ("adr", True)]
+      and "quality:" in (workspace / ".github" / "workflows" / "ci.yml").read_text()
+      and (workspace / "docs" / "adr" / "0003-quality-gate-thresholds.md").exists()
+      and git("log", "--format=%s", "-1").stdout.strip() == "Add the SonarQube quality gate"
+      and not any(e["failed"] for e in events("tool", "quality-1"))
+      and not list((dt.git_state(cfg) / "stages").glob("quality--*")), json.dumps(report)[:400])
 check("the stage runner leaves the harness as it found it",
       h.ask_operator is h.no_operator and dt.CONFIG is None and not any(isinstance(l, deliver.Progress) for l in h.LISTENERS))
 
@@ -506,10 +538,10 @@ start = dt.head_commit(dt.CONFIG)
 ctx = deliver.Context(dt.CONFIG, "pipeline", "feature/calc", deliver.PLAN, deliver.FEATURES, "adr-rule", start=start)
 gate = deliver.Gate(ctx, deliver.Progress())
 before = gate.adr_items()
-record, index = workspace / "docs" / "adr" / "0002-pipeline-design.md", workspace / "docs" / "adr" / "README.md"
+record, index = workspace / "docs" / "adr" / "0004-rule-check.md", workspace / "docs" / "adr" / "README.md"
 original_index = index.read_text()
-record.write_text(GOOD.replace("0001", "0002").replace("Use Postgres", "Pipeline design"))
-index.write_text(original_index + "- [0002](0002-pipeline-design.md) Pipeline design\n")
+record.write_text(GOOD.replace("0001", "0004").replace("Use Postgres", "Rule check"))
+index.write_text(original_index + "- [0004](0004-rule-check.md) Rule check\n")
 after = gate.adr_items()
 record.unlink()
 index.write_text(original_index)

@@ -179,7 +179,9 @@ OUT=/root/eval-round-1 EVALS=evals/tasks.agent.jsonl EFFORTS="low medium" SHARDS
   bash infra/pod_test.sh gemma4 evals
 ```
 
-`EVALS` selects the task file; `tasks.agent.jsonl` contains 18 cases. `SHARDS=2` splits
+`EVALS` selects the task file; `tasks.agent.jsonl` contains 19 cases, the last of which
+(`make-tests-pass`) expects the runner argument `--delivery evals/delivery.evals.json` so
+the agent can run the tests itself. `SHARDS=2` splits
 those cases over two processes per effort level (runner arguments `--shard 0/2` and
 `--shard 1/2`). All levels/shards run concurrently, so choose concurrency the GPU can
 support. Use a new `OUT` directory per experiment to avoid mixing previous results.
