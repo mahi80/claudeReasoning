@@ -281,6 +281,62 @@ def policy(body: dict) -> dict:
         if i == 1:
             return {"calls": [("read_file", j({"path": "q.txt"}))]}
         return {"text": f"q={last[0]}"}
+    confirmed = nudged(msgs, "Before this goes to the user")      # high effort self-check
+    if scenario == "delivery_plan":       # plan stage: skill, read the plan, write the feature list
+        if not acted:
+            return {"calls": [("load_skill", j({"name": "feature-planning"}))]}
+        if acted == 1:
+            return {"calls": [("read_file", j({"path": "docs/plan.md"}))]}
+        if acted == 2:
+            marker = "later" if "nothing chosen" in task else "this run"
+            text = (f"# Features\n\n## 1. Greeting endpoint ({marker})\n- Outcome: GET /hello greets\n"
+                    "- Acceptance: tests passes\n- Size: S\n\n## 2. Metrics page (later)\n- Outcome: later\n")
+            return {"calls": [("write_file", j({"path": "docs/plan/features.md", "content": text}))]}
+        return {"text": "CONFIRMED" if confirmed else "DONE: plan"}
+    if scenario == "delivery_plan_shell":  # a plan stage that reaches for a tool it was not given
+        if not acted:
+            return {"calls": [("run_shell", j({"command": "pytest"}))]}
+        if acted == 1:
+            text = "# Features\n\n## 1. Greeting endpoint (this run)\n- Outcome: GET /hello greets\n"
+            return {"calls": [("write_file", j({"path": "docs/plan/features.md", "content": text}))]}
+        return {"text": "CONFIRMED" if confirmed else "DONE: " + last_tool_results(msgs, 2)[0][:40]}
+    if scenario == "delivery_platform":   # platform stage: two skills, an ADR, the index, the lint
+        adr = ("# 0001. Platform: managed container service\nStatus: Proposed\nDate: 2026-11-28\n\n"
+               "## Context\nSmall web service, one team.\n\n## Decision\nA managed container service.\n\n"
+               "## Consequences\nA registry and an OIDC deploy identity are needed.\n\n"
+               "## Alternatives considered\nFunctions: cold starts. Virtual machines: more to run.\n\n"
+               "## Assumptions to confirm\n- [ ] Budget under 200 per month\n")
+        if not acted:
+            return {"calls": [("load_skill", j({"name": "cloud-choice"})), ("load_skill", j({"name": "adr"}))]}
+        if acted == 1:
+            return {"calls": [("write_file", j({"path": "docs/adr/0001-platform.md", "content": adr}))]}
+        if acted == 2:
+            return {"calls": [("write_file", j({"path": "docs/adr/README.md",
+                                                "content": "# Decisions\n- [0001](0001-platform.md) Platform (Proposed)\n"}))]}
+        if acted == 3:
+            return {"calls": [("run_checks", j({"name": "adr", "reason": "lint the new record"}))]}
+        return {"text": "CONFIRMED" if confirmed else f"DONE: platform {last[0].splitlines()[0]}"}
+    if scenario == "delivery_build":      # build stage: read the gate report, code, test, commit
+        branch = re.search(r"on branch (\S+)", task).group(1).rstrip(".")
+        if not acted:
+            return {"calls": [("read_file", j({"path": ".agent/gate-report.md"}))]}
+        if acted == 1:
+            value = "2" if "must define X = 2" in last[0] or "already fixed" in task else "1"
+            return {"calls": [("write_file", j({"path": "calc.py", "content": f"X = {value}\n"}))]}
+        if acted in (2, 3, 4):            # the same test command three times in a row
+            return {"calls": [("run_checks", j({"name": "tests", "reason": "after writing calc.py"}))]}
+        if acted == 5:
+            return {"calls": [("git_commit", j({"branch": branch, "message": "Add calc"}))]}
+        return {"text": "CONFIRMED" if confirmed else f"DONE: build {last[0][:30]}"}
+    if scenario == "delivery_worker":     # a worker may be granted the pre-approved checks
+        if not acted:
+            return {"calls": [("spawn_agent", j({"task": "[scenario:delivery_worker_sub] run the tests",
+                                                "tools": ["run_checks"]}))]}
+        return {"text": last[0]}
+    if scenario == "delivery_worker_sub":
+        if not acted:
+            return {"calls": [("run_checks", j({"name": "tests", "reason": "as asked"}))]}
+        return {"text": "worker saw " + last[0].splitlines()[0]}
     raise ValueError(f"unknown scenario {scenario}")
 
 

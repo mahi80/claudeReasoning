@@ -25,9 +25,13 @@ design document that explains every part.
 | [`harness/pod_manager.py`](harness/pod_manager.py) | Start the Runpod pod on demand, wait for `/health`, stop it when idle |
 | [`harness/run_evals.py`](harness/run_evals.py) | Replay a task file and report pass rate, steps, tokens and tool failures, one line per effort level |
 | [`harness/smoke_test.py`](harness/smoke_test.py) | Proves an endpoint returns parsed tool calls and that the thinking switch works |
+| [`harness/deliver.py`](harness/deliver.py) | Delivery stage runner: plan, platform, build, pipeline and quality stages, each judged by a gate written in code |
+| [`harness/delivery_tools.py`](harness/delivery_tools.py) | Guarded delivery tools: pre-approved checks, local commits, one approved push that opens the pull request |
+| [`harness/checks/adr_lint.py`](harness/checks/adr_lint.py) | Lint for architecture decision records: file names, template, index |
+| [`skills/`](skills) | Skills the model loads on demand, including the seven delivery skills |
 | [`app/server.py`](app/server.py) | HTMX chat UI on FastAPI: live progress, plan checklist, approvals, effort picker |
 | [`infra/runpod.md`](infra/runpod.md) | Pod template, serve commands per model, prices and monthly cost |
-| [`tests/`](tests) | Mock model endpoint, mock Runpod API and five test scripts |
+| [`tests/`](tests) | Mock model endpoint, mock Runpod API and six test scripts |
 
 ## How it works
 
@@ -143,10 +147,12 @@ python tests/test_harness.py      # 126 checks: tools, context, review evidence,
 python tests/test_evals.py        # 5 checks: grading, failure scoring and effort comparison
 python tests/test_eval_cases.py   # 43 checks: task graders, reference solutions and near-misses
 python tests/test_app.py          # 34 checks: chat UI, pod manager, approvals and budget deadlines
+python tests/test_delivery.py     # 67 checks: delivery config, guarded tools, ADR lint, gate and stage runner (needs git)
 python tests/test_ui_browser.py   # 22 checks in Chrome, including the complete skill/worker/MCP flow
 ```
 
-All 230 checks passed locally on 27 November 2026. Browser checks additionally need
+The 275 non-browser checks passed locally on 28 November 2026 (Windows, Python 3.14);
+the 22 browser checks last passed on 27 November 2026. Browser checks additionally need
 `pip install playwright` and installed Chrome or Chromium. Missing prerequisites produce
 a skip, not verification. If HTTPX rejects an IPv6 entry in your proxy exclusions, run
 local checks with `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost` for that
@@ -242,6 +248,78 @@ These limits cover agent execution, not preceding GPU/MCP startup or Runpod rent
 They are not a billing guarantee or an OS sandbox. Separate chat requests and manual
 checkpoint resumes start fresh budgets; effort escalation within one invocation does not.
 
+## Delivery stages: from a plan to a pull request
+
+[`harness/deliver.py`](harness/deliver.py) runs the agent as the coder inside a
+human-gated delivery pipeline. Each stage is one escalating run. A gate written in code,
+not the model's own judgement, accepts or rejects the result, a person reviews between
+stages and on the pull request, and GitHub Actions and SonarQube run on GitHub where
+people read them: the agent never sees CI.
+
+| Stage | The agent produces | The gate requires |
+|---|---|---|
+| `plan` | `docs/plan/features.md` from `docs/plan.md` | at least one feature marked "this run" |
+| `platform` | `docs/adr/0001-platform.md` (Proposed) and the ADR index | the ADR lint, a record added or changed since the stage started |
+| `build` | code and tests for the "this run" features, committed | the configured checks, the ADR lint, a clean tree ahead of the base branch |
+| `pipeline` | `.github/workflows/ci.yml` and its ADR, committed | `actionlint` if configured, the ADR lint, the git state |
+| `quality` | `sonar-project.properties`, the quality-gate job and its ADR, committed | the checks (`tests`, `sonar` if configured), the ADR lint, the git state |
+
+Setup, once per target repository, on a disposable host that is not the GPU pod:
+
+```bash
+git clone --separate-git-dir=/srv/delivery/target.git https://github.com/org/repo.git /srv/delivery/repo
+cp harness/delivery.example.json /srv/delivery/config.json      # edit checks, git, remote
+export AGENT_WORKSPACE=/srv/delivery/repo AGENT_DELIVERY_CONFIG=/srv/delivery/config.json
+export AGENT_MAX_SECONDS=3600 AGENT_MAX_TOTAL_TOKENS=400000
+python harness/deliver.py --stage plan               # then read docs/plan/features.md
+python harness/deliver.py --stage platform           # then accept or edit docs/adr/0001-platform.md
+python harness/deliver.py --stage build --branch feature/first
+GH_TOKEN=<fine-grained token: contents and pull requests on this one repository> \
+    python harness/deliver.py --push-only --branch feature/first
+```
+
+The harness checkout, its interpreter and the config stay outside the workspace. The
+config pins the `checks` the model may run through the `run_checks` tool (argv lists,
+timeouts, the names of environment variables each one may see; every such name must be
+exported before a stage whose gate runs that check, so `sonar` needs `SONAR_TOKEN` and
+`SONAR_HOST_URL`, and `actionlint` and `sonar-scanner` must be installed on the harness
+host), the `gate` list, and a `git` block: the separate git dir, the remote, the base
+branch, protected branch patterns, the commit author, the name of the token variable
+and `config`, git settings the operator needs (a proxy, say), which are passed on the
+command line. `run_checks` and `git_commit` need no approval click: the operator
+pre-approved the argv, and the commit is local, on a feature branch, with hooks, system
+and user configuration disabled and `.agent/` and check reports left out. Before every
+git command the harness scans the configuration git would read and refuses any file
+setting that could redirect a push or run a program (URL rewrites, proxies, hooks,
+filters, includes, remotes named by a URL, push URLs). `git_push_pr` is the only tool
+that asks for approval; it refuses a rewritten URL, the token reaches git only through
+[`harness/git_credential.py`](harness/git_credential.py), which answers for the
+configured host over https alone, and the pull request is opened through the GitHub
+API. Run the push as its own command (`--push-only`) so the token is never in the
+environment while the agent's checks execute model-written code. A rejected gate writes
+`.agent/gate-report.md` and the next effort level starts from an empty transcript and
+that report. A stage that must record a decision (`adr.require_changed`) is judged on
+the records the agent added or changed since the stage started, in its own commits or
+still uncommitted; the start is remembered across re-runs of a rejected stage. Exit codes:
+0 accepted or pushed and the pull request open, 1 rejected, 2 stopped at a limit, 3 the
+run failed or the arguments were wrong, 4 not pushed (not approved, branch not ready,
+push or pull request failed); `--result FILE` writes the outcome as JSON. The plain CLI gained the same `--run-id` and `--result`
+options and exit codes 0, 2 and 3. Console approvals need an interactive terminal;
+without one every approval is refused and the model is told nobody can approve.
+
+Seven skills carry the guidance: `delivery-workflow`, `feature-planning`,
+`cloud-choice`, `adr`, `github-actions`, `sonarqube` and `coding-conventions`.
+[`harness/checks/adr_lint.py`](harness/checks/adr_lint.py) enforces the ADR template,
+numbering and index, in the gate and as the `adr` check the model can run itself.
+
+What to expect: one small feature per run (two to four files of about 150 lines each)
+at the 32K context; serve a 65,536 window and raise `AGENT_CONTEXT_BUDGET` for high
+effort and above. The cloud choice is a proposal from the plan's constraints, not from
+prices or accounts, and deployment belongs to the CI job with OIDC and a protected
+environment, never to the agent. The model's capability on real repositories is
+unmeasured: the evals are small single-folder tasks, so run a dry run against a
+scratch repository first.
+
 ## From chat message to GPU and back
 
 ![Chat UI: GPU start, plan checklist and approval prompt](docs/img/ui-flow.png)
@@ -281,6 +359,7 @@ that GPU, so it cannot decide its own start.
 | `AGENT_MAX_STEPS` | `0` | Lowers the step cap for every effort level; `0` keeps each level's own cap |
 | `AGENT_CONTEXT_BUDGET` | `24000` | Soft message-size estimate for compaction; the context-window preflight also includes schemas |
 | `AGENT_MCP_CONFIG` | unset | Operator-controlled JSON file of approved servers and tool allowlists |
+| `AGENT_DELIVERY_CONFIG` | unset | Operator-controlled JSON file of pre-approved checks, git dir, remote and base branch for `deliver.py` |
 | `AGENT_MAX_SECONDS` | `900` | Shared agent-execution deadline; `0` disables it |
 | `AGENT_MAX_TOTAL_TOKENS` | `100000` | Shared model-token allowance, including workers and summaries; `0` disables it |
 | `AGENT_MAX_COST_USD` | `0` | Optional estimated model-token cost limit, not GPU rental |
@@ -340,6 +419,13 @@ stop the GPU or cap rental spending: export results and stop the pod yourself.
   Automatic shell reads use checked literal workspace paths, a limited set of flags,
   and no shell expansion; other commands require approval. Recursive shell reads are
   not automatically approved because they can follow links outside the workspace.
+- **Delivery checks and commits run without a click.** With a delivery config,
+  `run_checks` runs the operator's pinned commands and `git_commit` commits locally, so
+  pytest or npm executes code the model wrote on the harness host, as the same user as
+  the harness. The environment allow-list and the git hardening are hygiene, not a
+  boundary: keep that host disposable or run the checks under another user or in a
+  container, scope the push token to one repository and export it only for
+  `--push-only`, and never combine delivery with `AGENT_AUTO_APPROVE=1`.
 - **The approval layer is not a sandbox.** Approved shell commands can access the host
   outside the workspace. Runpod pods cannot run nested containers, so put the agent on
   a separate disposable pod or VM that holds no credentials.

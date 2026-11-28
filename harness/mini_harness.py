@@ -215,6 +215,7 @@ class Tool:
     parallel: bool = False       # safe to run next to other calls in the same turn
     strict: bool = True          # ask the server to constrain arguments to the schema
     max_chars: int = MAX_TOOL_CHARS
+    repeatable: bool = False     # the same call may run more than twice (a test command)
 
     def schema(self) -> dict:
         return {"type": "function", "function": {
@@ -544,12 +545,12 @@ def execute(call: dict, allowed: dict[str, Tool], seen: Counter) -> str:
             raise ValueError("arguments must be a JSON object")
     except ValueError as err:
         return f"ERROR: arguments are not valid JSON ({err}). Send the call again."
+    t = allowed[name]
     fingerprint = name + hashlib.sha1(raw.encode()).hexdigest()
     seen[fingerprint] += 1
-    if seen[fingerprint] > 2:
+    if seen[fingerprint] > 2 and not t.repeatable:
         return ("ERROR: this exact call has already run twice. "
                 "Try a different approach or give your final answer.")
-    t = allowed[name]
     time_left(120)
     # Keep shell approval with argv parsing to avoid a second parse changing execution mode.
     if t.name != "run_shell" and not approved(t, args):
@@ -735,12 +736,12 @@ def run_agent(task: str, system: str, tool_names: list[str], label: str = "main"
     scope_token = TOOL_SCOPE.set(tuple(n for n in tool_names if n in REGISTRY))
     try:
         budget.remaining()
-        return _run_agent(task, system, tool_names, label, resume, effort)
+        answer = _run_agent(task, system, tool_names, label, resume, effort)
     except BudgetExceeded as err:
         if label != "main" and not owner:
             raise
         trace("budget_limit", reason=str(err), agent=label)
-        return f"Stopped at the {err} before finishing. Inspect the trace and checkpoint."
+        answer = f"Stopped at the {err} before finishing. Inspect the trace and checkpoint."
     finally:
         TOOL_SCOPE.reset(scope_token)
         if owner:
@@ -748,6 +749,15 @@ def run_agent(task: str, system: str, tool_names: list[str], label: str = "main"
         if label == "main" or owner:
             trace("budget", tokens=budget.tokens, estimated_cost_usd=round(budget.cost, 8),
                   workers=budget.workers, reserved_tokens=budget.reserved_tokens)
+    if label == "main":           # one terminal event per run, for pipelines reading the trace
+        trace("answer", effort=effort, stopped=stopped(answer), chars=len(answer),
+              text=clip(answer, 2000))
+    return answer
+
+
+def stopped(answer: str) -> bool:
+    """Did a run end at a limit (steps, budget, review) instead of with an answer?"""
+    return answer.startswith("Stopped at")
 
 
 def _run_agent(task: str, system: str, tool_names: list[str], label: str,
@@ -855,17 +865,24 @@ def _run_agent(task: str, system: str, tool_names: list[str], label: str,
 
 
 def run_escalating(task: str, system: str, tool_names: list[str], start: str = "low",
-                   accept: Callable[[str], bool] = lambda answer: True) -> str:
-    """Start cheap and climb one level whenever a run stalls or its answer is rejected."""
+                   accept: Callable[[str], bool] = lambda answer: True,
+                   stop: str | None = None) -> str:
+    """Start cheap and climb one level whenever a run stalls or its answer is rejected.
+
+    `stop` names the highest level to try; the default climbs all the way to max.
+    """
     answer = ""
+    first, last = LADDER.index(start), LADDER.index(stop or LADDER[-1])
+    if last < first:
+        raise ValueError(f"the stop level {stop} is below the start level {start}")
     owner = BUDGET.get() is None
     if owner:
         budget_token = BUDGET.set(RunBudget(EFFORTS[start]))
     try:
-        for name in LADDER[LADDER.index(start):]:
-            stalled = answer.startswith("Stopped at")
+        for name in LADDER[first:last + 1]:
+            stalled = stopped(answer)
             answer = run_agent(task, system, tool_names, effort=name, resume=stalled)
-            if BUDGET.get().stopped or (not answer.startswith("Stopped at") and accept(answer)):
+            if BUDGET.get().stopped or (not stopped(answer) and accept(answer)):
                 break
             trace("escalate", after=name)
         return answer
@@ -940,28 +957,54 @@ Skills (call load_skill before work that one covers):
 {skills_index()}"""
 
 
-if __name__ == "__main__":
+def argument_parser(**kwargs):
+    """argparse that exits 3 (a failed run) on a usage error, since 2 means stopped at a limit."""
     import argparse
-    cli = argparse.ArgumentParser(description="Run one task through the agent loop.")
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message: str) -> None:
+            self.print_usage(sys.stderr)
+            self.exit(3, f"{self.prog}: error: {message}\n")
+    return Parser(**kwargs)
+
+
+if __name__ == "__main__":
+    cli = argument_parser(description="Run one task through the agent loop.")
     cli.add_argument("task", nargs="+")
     cli.add_argument("--effort", choices=LADDER, default="medium")
     cli.add_argument("--resume", action="store_true", help="continue from the checkpoint")
     cli.add_argument("--escalate", action="store_true",
                      help="start at --effort and climb a level each time a run stalls")
+    cli.add_argument("--run-id", default="", help="name for the trace, plan and checkpoint")
+    cli.add_argument("--result", default="", metavar="FILE",
+                     help="also write {run, status, answer, ...} as JSON to this file")
     args = cli.parse_args()
+    if args.run_id:
+        RUN_ID.set(args.run_id)
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     if MCP_CONFIG:
         # The bridge imports this module by name even when launched as a script.
         sys.modules["mini_harness"] = sys.modules[__name__]
         import mcp_bridge
         ORCHESTRATOR_TOOLS += mcp_bridge.load_config(MCP_CONFIG)
+    answer, status, started = "", "finished", time.time()
     try:
         prompt, system = " ".join(args.task), orchestrator_system()
         if args.escalate:
-            print(run_escalating(prompt, system, ORCHESTRATOR_TOOLS, start=args.effort))
+            answer = run_escalating(prompt, system, ORCHESTRATOR_TOOLS, start=args.effort)
         else:
-            print(run_agent(prompt, system, ORCHESTRATOR_TOOLS, resume=args.resume,
-                            effort=args.effort))
+            answer = run_agent(prompt, system, ORCHESTRATOR_TOOLS, resume=args.resume,
+                               effort=args.effort)
+        status = "stopped" if stopped(answer) else "finished"
+        print(answer)
+    except Exception as err:                        # exit code 3: the run itself broke
+        status = "failed"
+        print(f"RUN FAILED: {type(err).__name__}: {err}", file=sys.stderr)
     finally:
         if MCP_CONFIG:
             mcp_bridge.close()
+        if args.result:
+            Path(args.result).write_text(json.dumps({
+                "run": RUN_ID.get(), "effort": args.effort, "status": status,
+                "answer": answer, "seconds": round(time.time() - started, 1)}, indent=2))
+    sys.exit({"finished": 0, "stopped": 2, "failed": 3}[status])

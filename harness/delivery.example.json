@@ -1,0 +1,24 @@
+{
+  "home": "/srv/delivery/home",
+  "checks": {
+    "tests": {"argv": ["python", "-m", "pytest", "-q"], "timeout": 600},
+    "lint": {"argv": ["ruff", "check", "."], "timeout": 120},
+    "actionlint": {"argv": ["actionlint", "-no-color"], "timeout": 60},
+    "sonar": {"argv": ["sonar-scanner", "-Dsonar.qualitygate.wait=true"], "timeout": 900,
+              "env": ["SONAR_TOKEN", "SONAR_HOST_URL"]}
+  },
+  "gate": ["tests", "lint"],
+  "stage_gates": {"pipeline": ["actionlint"], "quality": ["tests", "sonar"]},
+  "git": {
+    "git_dir": "/srv/delivery/target.git",
+    "remote": "https://github.com/your-org/your-repo.git",
+    "base": "main",
+    "protected": ["main", "master", "release/*"],
+    "author": "Delivery Agent <delivery-agent@example.invalid>",
+    "token_env": "GH_TOKEN",
+    "repo": "your-org/your-repo",
+    "api": "https://api.github.com",
+    "config": {}
+  },
+  "adr": {"dir": "docs/adr", "require_changed": ["platform", "pipeline", "quality"]}
+}
