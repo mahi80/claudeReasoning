@@ -52,6 +52,12 @@ def events(kind: str) -> list[dict]:
             if e["event"] == kind]
 
 
+def checkpoint_observations(task: str) -> list[dict]:
+    target = h.checkpoint_file(task)
+    state = json.loads(target.read_text(encoding="utf-8"))
+    return h.EvidenceJournal(target).restore(state["evidence"])
+
+
 # 1. basic loop: write, read, answer
 out = h.run_agent("[scenario:basic] make a note", SYSTEM, ALL)
 check("basic tool loop", out == "DONE: hello" and (h.WORKSPACE / "notes/a.txt").read_text() == "hello", out)
@@ -329,8 +335,7 @@ check("max uses its own thinking fragment, merged with LLM_EXTRA_BODY",
 out, reqs, evs = run_at("medium", "[scenario:think] reason between calls")
 check("think is a no-op and does not leak reasoning into review evidence",
       out == "think said: noted" and "think" in offered(reqs[0])
-      and not json.loads(h.checkpoint_file("[scenario:think] reason between calls").read_text())[
-          "observations"], out)
+      and not checkpoint_observations("[scenario:think] reason between calls"), out)
 
 # xhigh: an independent reviewer with a fresh context can send the work back once
 out, reqs, evs = run_at("xhigh", "[scenario:review] reviewed once")
@@ -340,7 +345,7 @@ check("xhigh: a failed review sends the work back and the repair is reviewed",
       and [e["passed"] for e in kinds(evs, "review")] == [False, True], out)
 check("each reviewer has a fresh context and read-only tools",
       len(reviewer) == 4 and all(len(reviewer[n]["messages"]) == 2 for n in (0, 2))
-      and all(offered(r) == {"read_file", "list_dir", "think"} for r in reviewer)
+      and all(offered(r) == {"read_file", "list_dir", "think", "list_evidence", "read_evidence"} for r in reviewer)
       and "answer one" in reviewer[0]["messages"][1]["content"]
       and "answer two" in reviewer[2]["messages"][1]["content"])
 check("review verdicts retain the reason for rejection in the trace",
@@ -811,18 +816,19 @@ activity = json.loads(reviewer_requests[0]["messages"][1]["content"].split(
     "\n\n[Runtime-observed tool activity]\n", 1)[1])
 check("fresh reviewers receive actual skill and worker evidence without inherited reasoning",
       len(reviewer_requests[0]["messages"]) == 2
-      and all(offered(r) == {"read_file", "list_dir", "think"} for r in reviewer_requests)
+      and all(offered(r) == {"read_file", "list_dir", "think", "list_evidence", "read_evidence"}
+              for r in reviewer_requests)
       and any(row["agent"] == "worker" and row["tool"] == "demo__add"
               and row["result"] == "5" for row in activity)
       and any(row["tool"] == "load_skill" and "Use demo__add" in row["result"] for row in activity)
       and "Weighing the next step" not in reviewer_requests[0]["messages"][1]["content"])
-state = json.loads(h.checkpoint_file("[scenario:workflow] configured capabilities").read_text())
+retained = checkpoint_observations("[scenario:workflow] configured capabilities")
 r0, t0 = len(mock_llm.REQUESTS), len(h.TRACE_FILE.read_text().splitlines())
 resumed = h.run_agent("[scenario:workflow] configured capabilities", h.orchestrator_system(),
                       ALL + names, effort="xhigh", resume=True)
 resume_events = [json.loads(line) for line in h.TRACE_FILE.read_text().splitlines()[t0:]]
 check("checkpoints retain procedural evidence for independent review after resume",
-      state["observations"] == activity and resumed == "DONE: sum=5"
+      retained == activity and resumed == "DONE: sum=5"
       and [e["passed"] for e in kinds(resume_events, "review")] == [True]
       and not kinds(resume_events, "worker_start"))
 shared = h.RunBudget(h.EFFORTS["xhigh"])
@@ -834,9 +840,9 @@ try:
     shared.observations = [{**row, "result": "DENIED: arithmetic was not approved"}
                            if row["tool"] == "demo__add" else dict(row) for row in activity]
     failed_evidence = h.review("[scenario:workflow] configured capabilities", "DONE: sum=5", "xhigh")
-    shared.observations = activity
-    with patch.object(h, "MAX_TOOL_CHARS", 256):
-        clipped_evidence = h.review("[scenario:workflow] configured capabilities", "DONE: sum=5", "xhigh")
+    shared.observations = [{**row, "result": h.clip(row["result"], 32)}
+                           if row["tool"] == "load_skill" else dict(row) for row in activity]
+    clipped_evidence = h.review("[scenario:workflow] configured capabilities", "DONE: sum=5", "xhigh")
 finally:
     h.TOOL_SCOPE.reset(scope)
     h.BUDGET.reset(token)
@@ -844,6 +850,55 @@ check("missing, failed or clipped evidence cannot pass procedural review from ex
       fresh and verdict.startswith("FAIL\nSkill or MCP worker evidence is missing")
       and failed_evidence.startswith("FAIL\nSkill or MCP worker evidence is missing")
       and clipped_evidence.startswith("FAIL\nRuntime tool evidence is missing or incomplete"))
+skill_path = h.SKILLS_DIR / "arithmetic" / "SKILL.md"
+original_skill = skill_path.read_text()
+long_task = "[scenario:workflow] long retained skill evidence"
+r0, t0 = len(mock_llm.REQUESTS), len(h.TRACE_FILE.read_text().splitlines())
+h.ask_operator = lambda name, args: True
+try:
+    skill_path.write_text(original_skill + "Retained fixture guidance. " * 200)
+    with patch.object(h, "CONTEXT_BUDGET", 20000):
+        out = h.run_agent(long_task, h.orchestrator_system(), ALL + names, effort="xhigh")
+        long_activity = checkpoint_observations(long_task)
+        reqs = mock_llm.REQUESTS[r0:]
+        evs = [json.loads(line) for line in h.TRACE_FILE.read_text().splitlines()[t0:]]
+        reviewers = [r for r in reqs if r["messages"][0]["content"].startswith("You are an independent")]
+        header = json.loads(reviewers[0]["messages"][1]["content"].split(
+            "\n\n[Runtime-observed tool activity]\n", 1)[1])
+        check("long procedural evidence is indexed instead of clipped and passes review",
+              header["indexed"] and header["total_records"] == len(long_activity)
+              and out == "DONE: sum=5" and [e["passed"] for e in kinds(evs, "review")] == [True], out)
+        pages = [e for e in kinds(evs, "tool") if e["tool"] == "read_evidence"]
+        check("reviewer retrieves multiple bounded pages without polluting retained activity",
+              len(pages) >= 4 and all(e["agent"] == "reviewer" for e in pages)
+              and all(row["tool"] not in {"list_evidence", "read_evidence"}
+                      for row in long_activity))
+        check("paged reviewers retain read-only scopes and shared model accounting",
+              all(offered(r) == {"read_file", "list_dir", "think", "list_evidence", "read_evidence"}
+                  for r in reviewers)
+              and kinds(evs, "budget")[-1]["tokens"]
+              == sum(e["prompt_tokens"] + e["output_tokens"] for e in kinds(evs, "model")))
+        r0 = len(mock_llm.REQUESTS)
+        resumed = h.run_agent(long_task, h.orchestrator_system(), ALL + names, effort="xhigh", resume=True)
+        resumed_requests = mock_llm.REQUESTS[r0:]
+        check("long retained evidence remains retrievable after checkpoint resume",
+              resumed == "DONE: sum=5" and any("read_evidence" in offered(r)
+                  and any("read_evidence" in str(m.get("tool_calls", [])) for m in r["messages"])
+                  for r in resumed_requests), resumed)
+        budget = h.BUDGET.set(h.RunBudget(h.EFFORTS["xhigh"]))
+        scope = h.TOOL_SCOPE.set(tuple(ALL + names))
+        try:
+            h.BUDGET.get().observations = long_activity
+            with patch.object(h, "MAX_STEPS", 1):
+                verdict = h.review(long_task, "DONE: sum=5", "xhigh")
+            check("a reviewer that exhausts its step budget while paging cannot return PASS",
+                  verdict.startswith("Stopped at the 1-step limit"), verdict)
+        finally:
+            h.TOOL_SCOPE.reset(scope)
+            h.BUDGET.reset(budget)
+finally:
+    skill_path.write_text(original_skill)
+    h.ask_operator = h.no_operator
 mcp_bridge.close()
 cli_env = dict(os.environ, AGENT_MCP_CONFIG=str(config_path), AGENT_AUTO_APPROVE="1",
                AGENT_WORKSPACE=str(tmp / "cli-workspace"), AGENT_TRACE=str(tmp / "cli-trace.jsonl"),

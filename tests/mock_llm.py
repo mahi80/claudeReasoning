@@ -75,6 +75,34 @@ def nudged(msgs: list[dict], opening: str) -> bool:
     return any(m["role"] == "user" and m["content"].startswith(opening) for m in msgs[2:])
 
 
+def review_activity(msgs: list[dict]) -> tuple[list[dict], dict | None]:
+    first = next(m["content"] for m in msgs if m["role"] == "user")
+    source = json.loads(first.split("\n\n[Runtime-observed tool activity]\n", 1)[1])
+    if isinstance(source, list):
+        return source, None
+    calls = {call["id"]: call["function"]["name"] for m in msgs if m["role"] == "assistant"
+             for call in m.get("tool_calls", [])}
+    pages = [(calls.get(m["tool_call_id"]), json.loads(m["content"])) for m in msgs
+             if m["role"] == "tool" and calls.get(m["tool_call_id"]) in {"list_evidence", "read_evidence"}]
+    indices = [page for name, page in pages if name == "list_evidence"]
+    offset = indices[-1]["next_offset"] if indices else 0
+    if offset is not None:
+        return [], {"calls": [("list_evidence", json.dumps({"offset": offset}))]}
+    items = [item for page in indices for item in page["items"]
+             if item["tool"] in {"load_skill", "demo__add"}]
+    activity = []
+    for item in items:
+        parts = [page for name, page in pages if name == "read_evidence" and page["index"] == item["index"]]
+        offset = parts[-1]["next_offset"] if parts else 0
+        if offset is not None:
+            return [], {"calls": [("read_evidence", json.dumps({"index": item["index"], "offset": offset}))]}
+        text = "".join(part["content"] for part in parts)
+        if len(text) != parts[-1]["total_chars"]:
+            raise ValueError("incomplete retained record")
+        activity.append(json.loads(text))
+    return activity, None
+
+
 def policy(body: dict) -> dict:
     """Return {'text': str, 'calls': [(name, raw_args)], 'delay': float}."""
     msgs = body["messages"]
@@ -95,10 +123,13 @@ def policy(body: dict) -> dict:
     acted = sum(1 for m in msgs if m["role"] == "assistant" and m.get("tool_calls"))
     reviewer = msgs[0]["content"].startswith("You are an independent reviewer")
     if reviewer and scenario == "workflow":
-        marker = "\n\n[Runtime-observed tool activity]\n"
         try:
-            activity = json.loads(first_user.split(marker, 1)[1])
-        except (IndexError, ValueError):
+            activity, pending = review_activity(msgs)
+            if pending:
+                return pending
+        except (IndexError, KeyError, ValueError):
+            return {"text": "FAIL\nRuntime tool evidence is missing or incomplete"}
+        if any("characters clipped" in row["result"] or "bytes clipped" in row["result"] for row in activity):
             return {"text": "FAIL\nRuntime tool evidence is missing or incomplete"}
         observed = any(row["agent"] == "worker" and row["tool"] == "demo__add"
                        and json.loads(row["arguments"]) == {"a": 2, "b": 3}
@@ -107,9 +138,12 @@ def policy(body: dict) -> dict:
                       for row in activity)
         if not observed or not skilled:
             return {"text": "FAIL\nSkill or MCP worker evidence is missing"}
-        if not last:
+        reads = {call["id"] for m in msgs if m["role"] == "assistant" for call in m.get("tool_calls", [])
+                 if call["function"]["name"] == "read_file"}
+        reports = [m["content"] for m in msgs if m["role"] == "tool" and m["tool_call_id"] in reads]
+        if not reports:
             return {"calls": [("read_file", j({"path": "report.txt"}))]}
-        return {"text": "PASS" if last[0] == "sum=5" else "FAIL\nReport is incorrect"}
+        return {"text": "PASS" if reports[-1] == "sum=5" else "FAIL\nReport is incorrect"}
     if reviewer and scenario != "review":
         return {"text": "PASS"}
 
