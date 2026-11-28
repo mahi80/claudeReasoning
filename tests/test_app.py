@@ -46,8 +46,11 @@ with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
 web = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="error"))
-threading.Thread(target=web.run, daemon=True).start()
+web_thread = threading.Thread(target=web.run, daemon=True)
+web_thread.start()
 while not web.started:
+    if not web_thread.is_alive():
+        sys.exit("the chat server failed to start")
     time.sleep(0.05)
 BASE = f"http://127.0.0.1:{port}"
 STATE = mock_runpod.STATE
