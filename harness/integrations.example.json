@@ -1,0 +1,23 @@
+{
+  "services": {
+    "github": {
+      "url": "https://api.github.com",
+      "token_env": "GITHUB_TOKEN",
+      "resources": ["owner/repository"],
+      "tools": ["list_files", "read_file", "list_issues", "get_issue", "create_issue", "update_issue", "comment_issue", "list_requests", "get_request", "request_diff", "create_branch", "commit_files", "create_request", "comment_request", "review_request", "merge_request"]
+    },
+    "gitlab": {
+      "url": "https://gitlab.com/api/v4",
+      "token_env": "GITLAB_TOKEN",
+      "resources": ["group/project"],
+      "tools": ["list_files", "read_file", "list_issues", "get_issue", "create_issue", "update_issue", "comment_issue", "list_requests", "get_request", "request_diff", "create_branch", "commit_files", "create_request", "comment_request", "approve_request", "merge_request"]
+    },
+    "jira": {
+      "url": "https://your-domain.atlassian.net/rest/api/3",
+      "token_env": "JIRA_TOKEN",
+      "user_env": "JIRA_EMAIL",
+      "resources": ["APP"],
+      "tools": ["list_issues", "get_issue", "create_issue", "update_issue", "comment_issue", "list_transitions", "transition_issue"]
+    }
+  }
+}

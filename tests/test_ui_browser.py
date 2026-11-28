@@ -48,7 +48,8 @@ os.environ.update(
     RUNPOD_API=f"http://127.0.0.1:{rp_port}/v1", RUNPOD_POD_ID="pod123",
     RUNPOD_API_KEY="rp-key", LLM_HEALTH_URL=f"http://127.0.0.1:{rp_port}/health",
     POD_POLL_SECONDS="0.5", POD_IDLE_SECONDS="600", POD_START_TIMEOUT="30",
-    APPROVAL_TIMEOUT="30")
+    APPROVAL_TIMEOUT="30", AGENT_CHAT_AUTH_CONFIG=str(tmp / "access.json"),
+    FIXTURE_CHAT_TOKEN="local-browser-fixture-" + "a" * 32)
 mock_runpod.STATE["warm_polls"] = 4        # about two seconds of visible "starting GPU"
 config = tmp / "mcp.json"
 config.write_text(json.dumps({"servers": {"demo": {
@@ -69,6 +70,8 @@ server.h.WORKSPACE.mkdir(parents=True)
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
+(tmp / "access.json").write_text(json.dumps({"tenant": "fixture-team", "origin": f"http://127.0.0.1:{port}",
+    "users": {"fixture": {"token_env": "FIXTURE_CHAT_TOKEN"}}}))
 web = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="error"))
 web_thread = threading.Thread(target=web.run, daemon=True)
 web_thread.start()
@@ -90,10 +93,15 @@ with sync_playwright() as p:
     errors: list[str] = []
     page.on("pageerror", lambda err: errors.append(str(err)))
     page.goto(f"http://127.0.0.1:{port}/")
+    check("browser requires sign-in", page.url.endswith("/login"))
+    page.fill("input[name=token]", os.environ["FIXTURE_CHAT_TOKEN"])
+    page.get_by_role("button", name="Sign in", exact=True).click()
+    page.locator("input[name=message]").wait_for(timeout=10000)
+    check("browser login reaches chat", True)
 
     # first task: the pod is stopped, so the chat should show the GPU start
     page.fill("input[name=message]", "Save a note that says hello, then read it back")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     first = page.locator(".msg.agent").nth(0)
     first.locator(".status", has_text="Starting the GPU pod").wait_for(timeout=10000)
     check("browser shows GPU start status", True)
@@ -102,11 +110,14 @@ with sync_playwright() as p:
     first.locator(".answer", has_text="DONE: hello").wait_for(timeout=30000)
     check("browser shows the answer", first.locator(".answer").inner_text() == "DONE: hello")
     check("status line cleared at the end", first.locator(".status").inner_text().strip() == "")
+    bubble = first.bounding_box()
+    composer = page.locator('form[hx-post="/chat"]').bounding_box()
+    check("composer does not obscure the reply", bubble["y"] + bubble["height"] <= composer["y"])
     check("form reset after sending", page.input_value("input[name=message]") == "")
 
     # second task: needs approval twice; deny the first, approve the second
     page.fill("input[name=message]", "Delete the old build folder")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     second = page.locator(".msg.agent").nth(1)
     second.get_by_role("button", name="Deny").wait_for(timeout=15000)
     if shots:
@@ -127,7 +138,7 @@ with sync_playwright() as p:
     # third task: a longer job at high effort, so the checklist shows up and gets ticked
     page.select_option("select[name=effort]", "high")
     page.fill("input[name=message]", "Write the weekly report")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     third = page.locator(".msg.agent").nth(2)
     third.locator(".answer", has_text="plan seen").wait_for(timeout=30000)
     levels = [e["effort"] for e in map(json.loads, server.h.TRACE_FILE.read_text().splitlines())
@@ -143,7 +154,7 @@ with sync_playwright() as p:
         third.screenshot(path=f"{shots}/ui-plan.png")
     page.select_option("select[name=effort]", "medium")
     page.fill("input[name=message]", "[scenario:parallel_approvals] two workers need permission")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     fourth = page.locator(".msg.agent").nth(3)
     fourth.get_by_role("button", name="Approve").wait_for(timeout=15000)
     first_id = fourth.locator(".approval-request").get_attribute("id")
@@ -176,14 +187,14 @@ with sync_playwright() as p:
           fourth.locator(".approval button").count() == 0)
     page.select_option("select[name=effort]", "xhigh")
     page.fill("input[name=message]", "[scenario:review] repair and review the answer")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     fifth = page.locator(".msg.agent").nth(4)
     fifth.locator(".answer", has_text="answer two").wait_for(timeout=30000)
     check("browser shows the repaired answer after it passes review",
           fifth.locator(".answer").inner_text() == "answer two"
           and (server.h.WORKSPACE / "r.txt").read_text() == "right")
     page.fill("input[name=message]", "[scenario:review] stubborn agent")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     sixth = page.locator(".msg.agent").nth(5)
     sixth.locator(".answer", has_text="Stopped at the independent-review limit").wait_for(timeout=30000)
     check("browser reports review failure instead of accepting the draft",
@@ -192,14 +203,14 @@ with sync_playwright() as p:
           and sixth.locator(".approval button").count() == 0)
     page.select_option("select[name=effort]", "medium")
     page.fill("input[name=message]", "[scenario:basic] continue after a rejected answer")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     seventh = page.locator(".msg.agent").nth(6)
     seventh.locator(".answer", has_text="DONE: hello").wait_for(timeout=30000)
     check("chat remains usable after a review fails",
           seventh.locator(".answer").inner_text() == "DONE: hello"
           and page.input_value("input[name=message]") == "")
     page.fill("input[name=message]", "[scenario:workflow] use a skill and MCP worker")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     eighth = page.locator(".msg.agent").nth(7)
     eighth.get_by_role("button", name="Approve").wait_for(timeout=15000)
     check("a scoped worker's configured MCP call asks for approval in chat",
@@ -214,7 +225,7 @@ with sync_playwright() as p:
     server.h.RUN_MAX_TOKENS = 1
     try:
         page.fill("input[name=message]", "[scenario:basic] exceed the token budget")
-        page.click("form button")
+        page.click('form[hx-post="/chat"] button')
         ninth = page.locator(".msg.agent").nth(8)
         ninth.locator(".answer", has_text="Stopped at the token budget").wait_for(timeout=30000)
         check("chat reports shared budget exhaustion instead of a successful answer",
@@ -223,7 +234,7 @@ with sync_playwright() as p:
     finally:
         server.h.RUN_MAX_TOKENS = previous_tokens
     page.fill("input[name=message]", "[scenario:basic] recover after the budget stop")
-    page.click("form button")
+    page.click('form[hx-post="/chat"] button')
     tenth = page.locator(".msg.agent").nth(9)
     tenth.locator(".answer", has_text="DONE: hello").wait_for(timeout=30000)
     check("a new chat task gets its own execution budget",

@@ -1,0 +1,8 @@
+{
+  "tenant": "team",
+  "origin": "http://127.0.0.1:8080",
+  "session_seconds": 3600,
+  "users": {
+    "operator": {"token_env": "CHAT_OPERATOR_TOKEN"}
+  }
+}

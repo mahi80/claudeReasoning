@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 # ---------------------------------------------------------------- configuration
 BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
@@ -216,6 +216,7 @@ class Tool:
     strict: bool = True          # ask the server to constrain arguments to the schema
     max_chars: int = MAX_TOOL_CHARS
     repeatable: bool = False     # the same call may run more than twice (a test command)
+    operator_only: bool = False
 
     def schema(self) -> dict:
         return {"type": "function", "function": {
@@ -398,6 +399,8 @@ UNATTENDED = (
 
 
 def approved(t: Tool, args: dict) -> bool:
+    if t.operator_only:
+        return ask_operator(t.name, args)
     if not t.needs_approval or AUTO_APPROVE:
         return True
     if t.name == "run_shell" and is_read_only(str(args.get("command", ""))):
@@ -479,8 +482,10 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
     reservation = budget.reserve(prompt_size(messages, tools) + 4096, max_tokens) if budget else None
     if reservation:
         kwargs["max_tokens"] = reservation[1]
+    request_timeout = 600
     try:
-        sending = client.with_options(timeout=time_left(600), max_retries=0) if budget else client
+        request_timeout = time_left(600)
+        sending = client.with_options(timeout=request_timeout, max_retries=0) if budget else client
         with sending.chat.completions.create(**kwargs) as stream:
             timer = threading.Timer(time_left(600), stream.close) if budget else None
             if timer:
@@ -510,10 +515,15 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
             finally:
                 if timer:
                     timer.cancel()
-    except Exception:
+    except Exception as err:
         if budget:
             budget.settle(reservation, None)
         time_left(600)
+        if budget and request_timeout < 600 and isinstance(err, APITimeoutError):
+            # The SDK timeout can fire just before the shared wall-clock deadline.
+            with budget.lock:
+                budget.stopped = budget.stopped or "time budget"
+            raise BudgetExceeded(budget.stopped) from err
         raise
     if budget:
         budget.settle(reservation, reply)

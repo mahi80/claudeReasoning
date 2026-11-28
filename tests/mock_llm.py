@@ -110,6 +110,30 @@ def policy(body: dict) -> dict:
         if not last:
             return {"calls": [("read_file", j({"path": "report.txt"}))]}
         return {"text": "PASS" if last[0] == "sum=5" else "FAIL\nReport is incorrect"}
+    if scenario == "coding":
+        if reviewer:
+            if not last:
+                return {"calls": [("read_file", j({"path": "app.py"}))]}
+            return {"text": "FAIL\nMissing requested behavior" if "reviewfail" in words else "PASS"}
+        if msgs[0]["content"].startswith("You are a worker"):
+            return {"calls": [("read_file", j({"path": "app.py"}))]} if not last else {"text": "Inspected app.py"}
+        if nudged(msgs, "Before this goes to the user"):
+            return {"text": "CONFIRMED"}
+        steps = [("update_plan", {"plan": "[ ] implement addition\n[ ] verify"}),
+                 ("write_file", {"path": "app.py", "content": "def add(a, b):\n    return "
+                                 + ("0" if "badgate" in words else "a + b") + "\n"}),
+                 ("spawn_agent", {"task": "[scenario:coding] worker inspect implementation", "tools": ["read_file"]}),
+                 ("run_checks", {"name": "tests", "reason": "verify addition"})]
+        if "connectors" in words:
+            steps += [("github__list_issues", {"resource": "team/repo", "page": 1}),
+                      ("gitlab__list_issues", {"resource": "group/repo", "page": 1}),
+                      ("jira__list_issues", {"resource": "PROJ", "cursor": ""}),
+                      ("github__create_request", {"resource": "team/repo", "title": "Implement addition",
+                                                  "body": "Verified addition", "source": "feature/task", "target": "main"})]
+        if acted < len(steps):
+            name, arguments = steps[acted]
+            return {"calls": [(name, j(arguments))]}
+        return {"text": "Implemented addition. <script>alert(1)</script>" if "xss" in words else "Implemented addition and ran tests."}
     if reviewer and scenario != "review":
         return {"text": "PASS"}
 
