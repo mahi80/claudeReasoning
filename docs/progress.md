@@ -103,6 +103,121 @@ No dependency was installed, no account was connected, no real issue/request was
 no GPU was provisioned and no new daily user quota was introduced. Configurations are
 process-level, not tenant identities; this remains unsafe for public multi-user hosting.
 
+## Coding product milestone 3 — chat and terminal, verified locally
+
+The shared executor now has two consumers on the local `coding-chat-cli` branch:
+`app/server.py` coding mode and `harness/code_cli.py` one-shot/interactive terminal use.
+The source remains uncommitted and is not on GitHub. This is a local single-operator
+milestone, not a deployed ten-user service or a remote authenticated terminal client.
+
+- Configured chat defaults to Coding/high effort and streams plans, tool/worker progress,
+  required-check outcomes, independent review and accepted/rejected/stopped/failed results.
+  General chat remains available; its existing HTTP default stays medium. With no coding
+  configuration, Coding is disabled and a direct coding request is rejected.
+- When coding is configured, all chat tasks share one workspace lock, including General
+  tasks, so they cannot edit during another coding task's final checks/review. This lock
+  is in-process only: do not point concurrent CLI/server processes at the same workspace.
+  It is not tenant isolation, a durable queue or fair H200 inference scheduling.
+- Terminal supports one-shot tasks, successive interactive tasks, effort selection,
+  per-task run IDs, one-shot checkpoint resume and structured result export outside the
+  editable workspace. Each interactive task starts fresh model context over existing
+  workspace files; there is no durable conversation history. Exit codes are 0 accepted,
+  1 rejected, 2 stopped, 3 failed and 130 interrupted.
+- Both consumers load operator-configured MCP and GitHub/GitLab/Jira tools. Checks and
+  final read-only review still gate acceptance. Passing review does not authorize a push
+  or merge: each connector write needs its own explicit decision. A declined integration
+  action does not imply local coding failed; the final report must identify omitted work.
+- Initial regressions exposed main's clock-sensitive queued-approval fixture; only its
+  deterministic test correction from unmerged PR #7 was copied locally. A later run hit
+  an SDK timeout just before the shared deadline. The runtime now classifies a
+  deadline-shortened SDK timeout as a stopped time budget, without retries; normal
+  600-second/unbounded provider timeouts remain failures. A deterministic regression
+  covers both outcomes and reservation cleanup. No budget or approval limit was weakened.
+- A first terminal test attempt used the wrong fixture API key and failed authentication;
+  correcting the mock setup produced the results below. No live provider key was used.
+
+Final continuous Windows/Python 3.14.3 run using the merged `tests/run_offline.py`:
+
+| Script | Passing checks/tests |
+|---|---:|
+| `test_app.py` | 34 |
+| `test_code_cli.py` | 10 |
+| `test_coding.py` | 13 |
+| `test_coding_app.py` | 12 |
+| `test_delivery.py` | 70 |
+| `test_eval_cases.py` | 51 |
+| `test_evals.py` | 7 |
+| `test_harness.py` | 126 |
+| `test_integrations.py` | 24 |
+| **Total: all nine scripts exited 0** | **347/347** |
+
+These counts include assertions/unittest methods, not benchmark tasks. No Linux rerun,
+real DeepSeek/H200 inference or real GitHub/GitLab/Jira account validation was performed.
+Main README counts remain 288 until reviewed code lands and merged-main is revalidated.
+Hosted CI run 46123741330 on main `c21cd17` still reports failure; local passes do not
+change that status.
+
+The internal browser was exercised against local model/provider fixtures: accepted
+coding with actual generated files/check execution/review, failed-check rejection,
+failed-review rejection, explicit connector approve/deny, General chat regression,
+cleared input and escaped user/model text (zero injected scripts). The fixture was
+restarted on the latest runtime and the accepted path rerun; the screenshot was viewed
+and the current-page console had no warnings/errors. One earlier Windows Proactor socket
+reset occurred on browser reload; it was not an application run failure. This manual
+browser evidence is separate from the 347 offline checks and is not a live-model test.
+
+### Operator run order after the source is reviewed and published
+
+1. Set `AGENT_WORKSPACE` to the assigned repository and configure `LLM_BASE_URL`,
+   `LLM_API_KEY`, `LLM_MODEL` and any model-card-specific thinking fields for the
+   existing OpenAI-compatible/vLLM endpoint. Leave `RUNPOD_POD_ID` unset for an
+   operator-managed always-on H200 service. Use the existing dependency environment.
+2. Create an operator-owned checks JSON outside the editable workspace and set
+   `AGENT_DELIVERY_CONFIG` to its absolute path. It needs a nonempty `checks` map and
+   `gate` list. Each check has an operator-approved `argv` array and timeout; choose
+   actual project tests/builds. The agent cannot edit this configuration or install
+   dependencies automatically. Harness/interpreter/helpers must also remain outside
+   the editable workspace. These constraints are not an OS sandbox.
+3. Optionally copy `harness/integrations.example.json` outside the workspace, replace
+   provider bases and resource placeholders, remove unwanted services/tools, export
+   the credential environment variables and set `AGENT_INTEGRATIONS_CONFIG` to that
+   external file. Jira Cloud uses the REST v3 base and `JIRA_EMAIL`/`JIRA_TOKEN`; GitLab
+   uses its REST v4 base. Credentials are never model tool arguments. Existing optional
+   MCP configuration remains selected by `AGENT_MCP_CONFIG`.
+4. From the harness repository root, run either interface (substitute the interpreter
+   from the existing environment):
+
+   ```bash
+   python harness/code_cli.py "Implement the requested feature and verify it"
+   python harness/code_cli.py --interactive
+   python harness/code_cli.py --run-id task-001 --resume "Continue the implementation"
+   python -m uvicorn server:app --app-dir app --host 127.0.0.1 --port 8080
+   ```
+
+   Run only one process per workspace. Keep chat local or behind separately supplied
+   authentication. Interactive terminal approval requires typing `yes`; piped/unattended
+   one-shot tasks cannot publish. Checkpoint resume covers the agent implementation,
+   not a durable accepted-result ledger or completed external-write replay policy.
+5. Reproduce the non-browser regression with `python tests/run_offline.py`. To exercise
+   the coding UI without accounts or GPU cost, run
+   `python tests/coding_ui_fixture.py --port 8085` and submit `[scenario:coding]` tasks.
+   Add `badgate`, `reviewfail`, `xss` or `connectors` to exercise those fixture paths.
+
+### Next handoff
+
+1. Review the local source and request a scoped source commit/PR; this documentation
+   branch cannot deliver the implementation. Do not assume `coding-chat-cli` is remote.
+2. Add tenant authentication/ownership and isolated per-user execution before public
+   hosting, then durable task/result storage, cancellation, checkpoint-aware continuation
+   and a remote authenticated terminal protocol. Do not use the current global config
+   or workspace lock as multi-user security.
+3. Add fair inference scheduling for ten users and their workers/reviewers without daily
+   user quotas. Measure the chosen DeepSeek model, precision, context and four-H200
+   topology before promising capacity. GPU spending needs separate host-level limits.
+4. Separately authorize bounded live provider/model validation. Test account permissions,
+   protected-branch/merge policies, partial writes, provider API limits and real workload
+   quality; mocks do not establish production readiness.
+
 ## Skills cost and license milestone
 
 PR #9 contains two commits: the original reviewed import cherry-picked onto a fresh
@@ -249,8 +364,9 @@ hosted CI as unresolved, not passing; the merged runner is reused rather than du
 3. After approved code lands, revalidate the actual merged integration and update README
    counts from that run, not by adding together overlapping PR totals. This snapshot
    has moved out of the README top and is linked from it.
-4. Revalidate browser flows on the new integration and implement delivery-stage/chat
-   integration. This instance's browser rerun remains pending.
+4. After runtime/skills PRs merge, rerun browser flows on that actual merged integration.
+   Coding chat/terminal and manual browser validation are complete locally in milestone 3;
+   full five-stage delivery/chat integration and hosted access remain separate work.
 5. Separately authorize bounded live-model delivery/eval validation and confirm actual
    pod shutdown, preserving failures and assisted results as well as successes.
 6. Enforce host/container isolation and deployment budgets. Workspace checks and approvals
