@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 for folder in ("harness", "tests", "app"):
@@ -31,7 +32,8 @@ os.environ.update(
     RUNPOD_API=f"http://127.0.0.1:{rp_port}/v1", RUNPOD_POD_ID="pod123",
     RUNPOD_API_KEY="rp-key", LLM_HEALTH_URL=f"http://127.0.0.1:{rp_port}/health",
     POD_POLL_SECONDS="0.1", POD_IDLE_SECONDS="inf", POD_WATCH_SECONDS="0.3",
-    POD_START_TIMEOUT="20", APPROVAL_TIMEOUT="20")
+    POD_START_TIMEOUT="20", APPROVAL_TIMEOUT="20",
+    AGENT_CHAT_AUTH_CONFIG=str(tmp / "access.json"), FIXTURE_CHAT_TOKEN="local-chat-fixture-" + "a" * 32)
 
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
@@ -43,6 +45,9 @@ server.h.WORKSPACE.mkdir(parents=True)
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
+(tmp / "access.json").write_text(json.dumps({"tenant": "fixture-team", "origin": f"http://127.0.0.1:{port}",
+    "users": {"fixture": {"token_env": "FIXTURE_CHAT_TOKEN"}}}))
+HTTP = httpx.Client(headers={"Authorization": "Bearer " + os.environ["FIXTURE_CHAT_TOKEN"]})
 web = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="error"))
 threading.Thread(target=web.run, daemon=True).start()
 while not web.started:
@@ -59,14 +64,14 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def post_chat(message: str, effort: str | None = None) -> tuple[str, str]:
     form = {"message": message} | ({"effort": effort} if effort else {})
-    reply = httpx.post(f"{BASE}/chat", data=form, timeout=10)
+    reply = HTTP.post(f"{BASE}/chat", data=form, timeout=10)
     assert reply.status_code == 200, reply.text
     return re.search(r'sse-connect="/runs/(\w+)/events"', reply.text).group(1), reply.text
 
 
 def read_events(run_id: str, on_event=None) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
-    with httpx.stream("GET", f"{BASE}/runs/{run_id}/events", timeout=40) as reply:
+    with HTTP.stream("GET", f"{BASE}/runs/{run_id}/events", timeout=40) as reply:
         assert reply.status_code == 200
         assert reply.headers["content-type"].startswith("text/event-stream")
         event, data = None, []
@@ -90,10 +95,10 @@ def texts(events: list[tuple[str, str]], kind: str) -> list[str]:
 
 
 # 1. page loads with htmx wiring and local scripts
-page = httpx.get(BASE + "/").text
+page = HTTP.get(BASE + "/").text
 check("index page", 'hx-post="/chat"' in page and 'hx-ext="sse"' in page
-      and httpx.get(BASE + "/static/htmx.min.js").status_code == 200
-      and httpx.get(BASE + "/static/sse.min.js").status_code == 200)
+      and HTTP.get(BASE + "/static/htmx.min.js").status_code == 200
+      and HTTP.get(BASE + "/static/sse.min.js").status_code == 200)
 
 # 2. cold start: two requests at once start the pod exactly once and both finish
 ids, logs = [], {}
@@ -129,7 +134,7 @@ def click(event: str, data: str) -> None:
     if event == "approval" and "hx-post" in data:
         choice = "deny" if not clicks else "allow"
         url = re.search(r'hx-post="(/runs/\w+/approval/\w+/' + choice + ')"', data).group(1)
-        clicks.append(httpx.post(BASE + url, timeout=10).text)
+        clicks.append(HTTP.post(BASE + url, timeout=10).text)
 
 
 run_id, _ = post_chat("[scenario:denied] ui shell")
@@ -154,7 +159,7 @@ def pending_prompt(run: server.Run, number: int) -> str:
     return re.search(r'hx-post="(/runs/\w+/approval/\w+)/allow"', fragment).group(1)
 
 
-concurrent = server.Run()
+concurrent = server.Run(server.Principal("fixture-team", "fixture"))
 server.RUNS[concurrent.id] = concurrent
 choices = {}
 
@@ -171,27 +176,27 @@ second.start()
 check("approval targets only its own prompt",
       "closest .approval-request" in concurrent.events[-1][1])
 check("first concurrent command can be approved",
-      httpx.post(BASE + first_prompt + "/allow").text == "Approved")
+      HTTP.post(BASE + first_prompt + "/allow").text == "Approved")
 first.join(5)
 second_prompt = pending_prompt(concurrent, 2)
 check("one click releases only one concurrent command",
       choices == {"first": True} and first_prompt != second_prompt and second.is_alive())
 check("stale approval cannot authorize the next command",
-      httpx.post(BASE + first_prompt + "/allow").status_code == 409
+      HTTP.post(BASE + first_prompt + "/allow").status_code == 409
       and choices == {"first": True})
 check("unknown approval ID and invalid choice are rejected",
-      httpx.post(f"{BASE}/runs/{concurrent.id}/approval/nope/allow").status_code == 409
-      and httpx.post(BASE + second_prompt + "/invalid").status_code == 422)
+      HTTP.post(f"{BASE}/runs/{concurrent.id}/approval/nope/allow").status_code == 409
+      and HTTP.post(BASE + second_prompt + "/invalid").status_code == 422)
 check("second concurrent command needs its own decision",
-      httpx.post(BASE + second_prompt + "/deny").text == "Denied")
+      HTTP.post(BASE + second_prompt + "/deny").text == "Denied")
 second.join(5)
 check("concurrent decisions stay isolated",
       choices == {"first": True, "second": False} and not second.is_alive())
 check("answered approval cannot be submitted twice",
-      httpx.post(BASE + second_prompt + "/allow").status_code == 409)
+      HTTP.post(BASE + second_prompt + "/allow").status_code == 409)
 concurrent.emit("done", "ok", last=True)
 
-expired = server.Run()
+expired = server.Run(server.Principal("fixture-team", "fixture"))
 server.RUNS[expired.id] = expired
 previous_timeout = server.APPROVAL_TIMEOUT
 server.APPROVAL_TIMEOUT = 0.05
@@ -201,11 +206,11 @@ finally:
     server.APPROVAL_TIMEOUT = previous_timeout
 expired_prompt = pending_prompt(expired, 1)
 check("timed-out approval is denied and cannot be revived",
-      refused and httpx.post(BASE + expired_prompt + "/allow").status_code == 409
+      refused and HTTP.post(BASE + expired_prompt + "/allow").status_code == 409
       and expired.pending_approval is None)
 expired.emit("done", "ok", last=True)
 
-budgeted = server.Run()
+budgeted = server.Run(server.Principal("fixture-team", "fixture"))
 server.RUNS[budgeted.id] = budgeted
 approval_waits = []
 wait_for_answer = budgeted.answered.wait
@@ -230,22 +235,19 @@ check("approval waits respect the task deadline and clear pending permission",
       stopped and len(approval_waits) >= 2 and budgeted.pending_approval is None
       and not budgeted.approval_lock.locked())
 budgeted.emit("done", "ok", last=True)
-queued = server.Run()
+queued = server.Run(server.Principal("fixture-team", "fixture"))
 queued.approval_lock.acquire()
-budget = server.h.RunBudget(server.h.EFFORTS["medium"])
-budget.deadline = time.monotonic() + 0.05
-token = server.h.BUDGET.set(budget)
 try:
-    try:
-        queued.ask("run_shell", {"command": "queued-command"})
-        stopped = False
-    except server.h.BudgetExceeded:
-        stopped = True
+    with patch.object(server.h, "time_left", side_effect=[0.001, server.h.BudgetExceeded("time budget")]) as deadline:
+        try:
+            queued.ask("run_shell", {"command": "queued-command"})
+            stopped = False
+        except server.h.BudgetExceeded:
+            stopped = True
 finally:
-    server.h.BUDGET.reset(token)
     queued.approval_lock.release()
 check("queued approvals cannot wait beyond the shared task deadline",
-      stopped and queued.pending_approval is None and not queued.events)
+      stopped and deadline.call_count == 2 and queued.pending_approval is None and not queued.events)
 previous_tokens = server.h.RUN_MAX_TOKENS
 server.h.RUN_MAX_TOKENS = 1
 try:
@@ -281,7 +283,7 @@ check("chosen effort reaches the harness",
       and [e["effort"] for e in run_events(run_id)] == ["low"]
       and [e["effort"] for e in run_events(ids[0])] == ["medium"], str(run_events(run_id)))
 check("unknown effort level is rejected",
-      httpx.post(f"{BASE}/chat", data={"message": "x", "effort": "turbo"}).status_code == 422)
+      HTTP.post(f"{BASE}/chat", data={"message": "x", "effort": "turbo"}).status_code == 422)
 run_id, _ = post_chat("[scenario:review] ui reviewed", "xhigh")
 reviewed = read_events(run_id)
 check("review progress shown in the chat",
@@ -291,8 +293,8 @@ check("review progress shown in the chat",
       " | ".join(texts(reviewed, "status")))
 
 # 6. unknown run and replay of a finished run
-check("unknown run is 404", httpx.get(f"{BASE}/runs/nope/events").status_code == 404
-      and httpx.post(f"{BASE}/runs/nope/approval/nope/allow").status_code == 404)
+check("unknown run is 404", HTTP.get(f"{BASE}/runs/nope/events").status_code == 404
+      and HTTP.post(f"{BASE}/runs/nope/approval/nope/allow").status_code == 404)
 replay = read_events(ids[0])
 check("finished run replays for a reconnecting browser",
       texts(replay, "answer") == ["DONE: hello"] and replay[-1] == ("done", "ok"))

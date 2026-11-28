@@ -596,7 +596,7 @@ def _push(config: Config, branch: str, title: str, body: str, token: str) -> str
 
 
 # ---------------------------------------------------------------- registration
-def register(path: str, adr_lint: Path | None = None) -> list[str]:
+def register(path: str, adr_lint: Path | None = None, checks_only: bool = False) -> list[str]:
     """Load the operator's config and add the delivery tools to the registry. Returns names.
 
     With adr_lint, a check named "adr" that lints the decision records is added unless
@@ -618,7 +618,7 @@ def register(path: str, adr_lint: Path | None = None) -> list[str]:
         "instead of run_shell; it needs no approval and may be repeated after each fix.",
         obj(name="Check name exactly as configured",
             reason="Why you run it now, in a few words"), run_checks, repeatable=True)]
-    if config.git:
+    if config.git and not checks_only:
         tools += [Tool(
             "git_commit", "Commit every change in the workspace to the named feature branch, "
             "creating the branch from the current head when it does not exist. Protected "
