@@ -54,13 +54,15 @@ OUTPUT_PRICE = float(os.environ.get("LLM_OUTPUT_USD_PER_MILLION", "0"))
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=600)
 RUN_ID = contextvars.ContextVar("run_id", default="-")   # set by the caller per request
 LISTENERS: list[Callable[[dict], None]] = []             # e.g. a UI showing live progress
+TRACE_LOCK = threading.Lock()
 
 
 def trace(event: str, **data) -> None:
     """Append one JSON line per event. This file is the audit trail."""
     record = {"ts": round(time.time(), 3), "run": RUN_ID.get(), "event": event, **data}
-    with TRACE_FILE.open("a") as f:
-        f.write(json.dumps(record) + "\n")
+    with TRACE_LOCK:
+        with TRACE_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
     for listener in LISTENERS:
         listener(record)
 

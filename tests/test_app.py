@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 for folder in ("harness", "tests", "app"):
@@ -232,20 +233,17 @@ check("approval waits respect the task deadline and clear pending permission",
 budgeted.emit("done", "ok", last=True)
 queued = server.Run()
 queued.approval_lock.acquire()
-budget = server.h.RunBudget(server.h.EFFORTS["medium"])
-budget.deadline = time.monotonic() + 0.05
-token = server.h.BUDGET.set(budget)
 try:
-    try:
-        queued.ask("run_shell", {"command": "queued-command"})
-        stopped = False
-    except server.h.BudgetExceeded:
-        stopped = True
+    with patch.object(server.h, "time_left", side_effect=[0.001, server.h.BudgetExceeded("time budget")]) as deadline:
+        try:
+            queued.ask("run_shell", {"command": "queued-command"})
+            stopped = False
+        except server.h.BudgetExceeded:
+            stopped = True
 finally:
-    server.h.BUDGET.reset(token)
     queued.approval_lock.release()
 check("queued approvals cannot wait beyond the shared task deadline",
-      stopped and queued.pending_approval is None and not queued.events)
+      stopped and deadline.call_count == 2 and queued.pending_approval is None and not queued.events)
 previous_tokens = server.h.RUN_MAX_TOKENS
 server.h.RUN_MAX_TOKENS = 1
 try:
