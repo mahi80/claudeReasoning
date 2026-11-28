@@ -18,13 +18,47 @@ not measured. [Back to README](../README.md).
 | `pod-lifecycle-fixes` at `0c93753` | Standalone pod lifecycle fixes, based on `main` without skills | [PR #5](https://github.com/mahi80/claudeReasoning/pull/5) open; 305/305 offline checks/tests passed; not merged |
 | `reviewer-evidence-checkpoints` at `d055fe8` | Read-only reviewer paging and checkpoint journals, based on `main` without skills or pod fixes | [PR #6](https://github.com/mahi80/claudeReasoning/pull/6) open; 323/323 offline checks/tests passed; not merged |
 | `eval-outcomes-trace` at `8711797` | Five-outcome eval reporting, per-process trace lock and regression tests, based on `main` without other runtime concerns | [PR #7](https://github.com/mahi80/claudeReasoning/pull/7) open; 313/313 offline checks/tests passed; not merged |
-| `ci-offline-suites` | Offline test discovery/runner and Windows/Linux/browser CI, proposed by the other instance | [PR #8](https://github.com/mahi80/claudeReasoning/pull/8) open; hosted jobs currently fail before any steps execute; not merged |
+| `main` at `c21cd17` | Offline test discovery/runner and Windows/Linux/browser CI, proposed by the other instance | [PR #8](https://github.com/mahi80/claudeReasoning/pull/8) merged; newest main CI run 46123741330 failed |
 | `skills-library` at `9f6fd43` | All 41 skills, bounded on-demand imported-library discovery and complete root NOTICE attribution, based directly on `main` | [PR #9](https://github.com/mahi80/claudeReasoning/pull/9) open; 307/307 offline checks/tests passed; not merged |
 
-No PR above main's four merged PRs has been merged by this instance. Review each
-concern independently; do not merge the older `skills-import` branch instead of PR #9.
+Main now also includes PR #8 at `c21cd17`; that merge was performed outside this instance.
+PRs #5–#7 and #9 remain open. Review each concern independently; do not merge the older
+`skills-import` branch instead of PR #9.
 The three runtime PRs and PR #9 are each based directly on `main` at `440c409` and do
 not inherit one another. Original worktrees and published branches remain intact.
+
+## Coding product milestone 1 — shared executor
+
+User direction: primarily coding tasks, entered through chat or a terminal, using
+DeepSeek on a planned four-H200 inference service for up to ten users, without daily
+user token/task quotas. GPU scheduling, tenant isolation and deployment remain separate
+work; no GPU was provisioned and no hosted access was enabled.
+
+A new local `coding-chat-cli` branch starts directly from current main `c21cd17`, without
+unmerged runtime/skills PRs. Its source is still uncommitted and not published remotely.
+The existing worktrees remain untouched.
+
+- Added `harness/coding.py`: one coding workflow for both forthcoming interfaces,
+  using the configured OpenAI-compatible/vLLM endpoint, existing skills, explicit worker
+  grants and optional operator-configured MCP tools.
+- Coding inspects files, plans and implements work. Programs run only through trusted
+  operator-configured checks; coding does not receive arbitrary shell or git publication
+  tools. No automatic dependency installation, commit, push or deployment is enabled.
+- The config stays outside the editable workspace and must name at least one gate check.
+  Required checks are rerun after implementation, and a fresh read-only reviewer must
+  return PASS before the result is accepted. Failed/missing checks, stopped execution,
+  blank reports and missing/failed review verdicts cannot become accepted results.
+- Implementation, checks and review share one existing per-run execution budget; no
+  daily user quota was added. Existing context/runaway safeguards remain while durable
+  continuation and fair hosted scheduling are developed.
+- Focused validation: **12/12 coding executor tests passed**, including real file tools,
+  scoped delegation, actual isolated Python check execution and fixture-model review;
+  failing gates, review failures, budget stops, secret-safe exceptions and configuration
+  confinement are covered. Full current-main regressions are running separately.
+- Next milestone: wire chat coding mode and an interactive/one-shot terminal client to
+  this executor, test HTTP/CLI and the in-app browser, then publish another handoff.
+  The current app has no tenant authentication or container isolation and is not safe
+  for public multi-user hosting.
 
 ## Skills cost and license milestone
 
@@ -157,9 +191,10 @@ runtime or skills changes. The 27 November B300 evidence documented in the READM
 validate the new delivery stages or the full 19-case benchmark.
 
 PR #8 reports local Windows/Linux and 22/22 browser checks from the other instance;
-those claims were not independently reproduced here. GitHub's run 46112243942 currently
-shows all four jobs failed with no executed steps, and failed-job logs were unavailable.
-Treat hosted CI as unresolved, not passing. Avoid duplicating its runner/workflow work.
+those claims were not independently reproduced here. GitHub's historical run 46112243942
+showed all four jobs failed with no executed steps, and failed-job logs were unavailable.
+PR #8 subsequently merged, and newest main run 46123741330 also reports failure. Treat
+hosted CI as unresolved, not passing; the merged runner is reused rather than duplicated.
 
 ## Remaining work, in order
 
