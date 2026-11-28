@@ -1,5 +1,7 @@
 # claudeReasoning
 
+[![ci](https://github.com/mahi80/claudeReasoning/actions/workflows/ci.yml/badge.svg)](https://github.com/mahi80/claudeReasoning/actions/workflows/ci.yml)
+
 A small, readable agent harness in the style Claude itself runs in, built to work with
 open-weight models (Gemma 4, Mistral Small 4, DeepSeek V4-Flash and V4.1-Flash) served by vLLM on
 Runpod on-demand Pods. It comes with a chat UI, on-demand GPU start and stop, and a
@@ -31,7 +33,8 @@ design document that explains every part.
 | [`skills/`](skills) | Skills the model loads on demand, including the seven delivery skills |
 | [`app/server.py`](app/server.py) | HTMX chat UI on FastAPI: live progress, plan checklist, approvals, effort picker |
 | [`infra/runpod.md`](infra/runpod.md) | Pod template, serve commands per model, prices and monthly cost |
-| [`tests/`](tests) | Mock model endpoint, mock Runpod API and six test scripts |
+| [`tests/`](tests) | Mock model endpoint, mock Runpod API, six test scripts and `run_offline.py`, which runs them one by one |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI: the offline suites on Ubuntu and Windows and the browser suite in Chrome, on every pull request |
 
 ## How it works
 
@@ -146,6 +149,7 @@ Otherwise:
 ```bash
 pip install -r requirements.txt
 
+python tests/run_offline.py       # every suite below except the browser one, one result line per script
 python tests/test_harness.py      # 126 checks: tools, context, review evidence, MCP config, workers and budgets
 python tests/test_evals.py        # 7 checks: grading, failure scoring, effort comparison and --delivery
 python tests/test_eval_cases.py   # 51 checks: task graders, reference solutions and near-misses
@@ -154,8 +158,16 @@ python tests/test_delivery.py     # 70 checks: delivery config, guarded tools, A
 python tests/test_ui_browser.py   # 22 checks in Chrome, including the complete skill/worker/MCP flow
 ```
 
-The 288 non-browser checks passed locally on 28 November 2026 (Windows, Python 3.14);
-the 22 browser checks last passed on 27 November 2026. Browser checks additionally need
+`tests/run_offline.py` runs each script in its own process and ends with a table of
+results; `--browser` runs only the browser suite and counts a skip as a failure, and a
+name such as `delivery` runs one script. GitHub Actions runs the same commands on every
+pull request and every push to `main` ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+the offline suites on Ubuntu with Python 3.11 and 3.14 and on Windows with Python 3.14,
+and the browser suite against the Chrome installed on the Ubuntu runner.
+
+The 288 non-browser checks passed locally on 28 November 2026 on Windows with Python
+3.11 and 3.14 and on Ubuntu 24.04 with Python 3.12, and the 22 browser checks passed in
+headless Chrome on Windows. Browser checks additionally need
 `pip install playwright` and installed Chrome or Chromium. Missing prerequisites produce
 a skip, not verification. If HTTPX rejects an IPv6 entry in your proxy exclusions, run
 local checks with `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost` for that
