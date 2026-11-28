@@ -8,3 +8,33 @@ This product bundles third-party files:
 - htmx 2.0.10 (app/static/htmx.min.js) and htmx-ext-sse 2.2.4 (app/static/sse.min.js),
   unmodified copies from https://htmx.org, under the Zero-Clause BSD licence (0BSD).
   Details and integrity digests: app/static/THIRD_PARTY.md.
+
+- 33 modified, instruction-only skills, adapted on 2026-11-28:
+  - anthropics/skills: Apache-2.0 (skills/licenses/anthropic-APACHE-2.0.txt).
+  - DietrichGebert/ponytail: MIT (skills/licenses/ponytail-MIT.txt).
+  - obra/superpowers: MIT (skills/licenses/superpowers-MIT.txt).
+  - mattpocock/skills: MIT (skills/licenses/mattpocock-MIT.txt).
+  - vercel-labs/agent-skills: MIT (skills/licenses/vercel-react-MIT.txt).
+  - vercel-labs/web-interface-guidelines: MIT (skills/licenses/vercel-guidelines-MIT.txt).
+  - affaan-m/ECC: MIT (skills/licenses/ecc-MIT.txt).
+  - hashicorp/agent-skills: MPL-2.0 (skills/licenses/terraform-MPL-2.0.txt).
+    The two modified Terraform SKILL.md files retain MPL notices and source terms;
+    unrelated harness files are not relicensed.
+  - aws/agent-toolkit-for-aws: Apache-2.0 (skills/licenses/aws-APACHE-2.0.txt).
+    Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+    Retained upstream notice: skills/licenses/aws-NOTICE.txt.
+  - microsoft/azure-skills: MIT (skills/licenses/azure-MIT.txt).
+  - cloudflare/skills: Apache-2.0 (skills/licenses/cloudflare-APACHE-2.0.txt).
+  - GoogleCloudPlatform/cloud-run-mcp: Apache-2.0 (skills/licenses/cloud-run-APACHE-2.0.txt).
+  - wshobson/agents: MIT (skills/licenses/wshobson-MIT.txt).
+  - sickn33/antigravity-awesome-skills: CC-BY-4.0 written content
+    (skills/licenses/aas-CONTENT.txt and skills/licenses/CC-BY-4.0.txt).
+    Agent Evaluation retains Apache-2.0 attribution to Vibeship Spawner Skills and
+    AAS modifications, including the prior 2026-09-05 change notice.
+    AI Prompt Regression Testing: Ranjeet2063. Agent Evaluation Reporting: Whxuan0701.
+    Retained code license: skills/licenses/aas-MIT.txt; no helper code was imported.
+
+  Exact source revisions, authors, modification notices and full attribution:
+  skills/provenance.json and skills/THIRD_PARTY_NOTICES.md. These compact adaptations
+  omit upstream scripts, installers, hooks, plugins, datasets and cloud integrations.
+  Source copyright notices and complete license terms remain in skills/licenses/.
