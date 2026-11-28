@@ -172,6 +172,7 @@ browser evidence is separate from the 347 offline checks and is not a live-model
    `LLM_API_KEY`, `LLM_MODEL` and any model-card-specific thinking fields for the
    existing OpenAI-compatible/vLLM endpoint. Leave `RUNPOD_POD_ID` unset for an
    operator-managed always-on H200 service. Use the existing dependency environment.
+   Chat additionally requires the authentication prerequisite in milestone 4 below.
 2. Create an operator-owned checks JSON outside the editable workspace and set
    `AGENT_DELIVERY_CONFIG` to its absolute path. It needs a nonempty `checks` map and
    `gate` list. Each check has an operator-approved `argv` array and timeout; choose
@@ -217,6 +218,106 @@ browser evidence is separate from the 347 offline checks and is not a live-model
 4. Separately authorize bounded live provider/model validation. Test account permissions,
    protected-branch/merge policies, partial writes, provider API limits and real workload
    quality; mocks do not establish production readiness.
+
+## Coding product milestone 4 — authenticated single-tenant task access
+
+The local `coding-chat-cli` implementation now requires operator-configured chat
+authentication. Source is still uncommitted and unpublished; this documentation branch
+contains none of the executable changes. This is an access-control milestone for one
+trusted repository/tenant per process, not isolated execution for unrelated tenants.
+
+- Added `app/access.py` and `app/access.example.json`. An external configuration selected
+  by `AGENT_CHAT_AUTH_CONFIG` names one tenant, users, their credential environment-variable
+  names and the exact public origin. Missing authentication configuration fails startup;
+  missing/weak/duplicate tokens, unknown configuration fields and workspace-owned
+  configuration are rejected. There is no anonymous/local bypass or proxy-header identity.
+- HTTP clients authenticate with `Authorization: Bearer ...`; browser users sign in using
+  an access-token form. Tokens are not accepted in query strings. The server stores token
+  and session digests, not their plaintext, and does not insert credentials into task
+  prompts, tool arguments or traces. Operators must generate independent high-entropy
+  tokens; the minimum length check is not proof of entropy or password security.
+- Browser sessions are opaque, HttpOnly, SameSite=Strict, host-only cookies, marked Secure
+  for HTTPS. HTTPS is required except for explicitly configured loopback HTTP fixtures.
+  Login and cookie-authenticated mutations require the exact configured Origin; invalid
+  Authorization headers cannot fall back to an otherwise valid cookie. Responses use
+  no-store. Token issuance, account onboarding and OAuth/SSO remain operator responsibilities.
+- Each task stores the authenticated tenant/user identity. Only that principal can read
+  its SSE stream or approve its exact pending prompt; other principals see the same 404
+  as a missing run, even when they know its IDs. User-supplied owner/tenant fields cannot
+  choose task ownership. Provider writes still require their existing explicit approval.
+- Logout revokes that browser session, and open SSE streams recheck session validity before
+  sending another batch. Expiration defaults to one hour and is operator-configurable
+  between 60 seconds and one day. Up to eight active browser sessions per user are retained;
+  older sessions are revoked. This is credential housekeeping, not a daily task/token quota.
+  Logout does not cancel a running job or automatically deny every outstanding prompt;
+  job cancellation and durable approval state remain future work.
+- The UI shows the signed-in identity and sign-out control. Small-screen browser testing
+  caught the sticky composer obscuring verification details after adding the identity row.
+  The composer now stays in document flow; after restarting the fixture, the reply/checks/
+  review were visible with no overlap or horizontal overflow and a cleared task input.
+
+Focused authentication verification: **22/22 unittest methods passed**, covering config
+boundaries, credentials, origins, cookies, expiration, session bounds, logout/replay,
+unauthenticated rejection before model execution, owner assignment, cross-user streams
+and pending approvals, live-stream revocation and real fixture coding without access
+credentials in model requests/results/traces. The existing chat/coding HTTP suites also
+passed with authenticated fixtures.
+
+Final continuous Windows/Python 3.14.3 regression after the layout correction:
+
+| Script | Passing checks/tests |
+|---|---:|
+| `test_access.py` | 22 |
+| `test_app.py` | 34 |
+| `test_code_cli.py` | 10 |
+| `test_coding.py` | 13 |
+| `test_coding_app.py` | 12 |
+| `test_delivery.py` | 70 |
+| `test_eval_cases.py` | 51 |
+| `test_evals.py` | 7 |
+| `test_harness.py` | 126 |
+| `test_integrations.py` | 24 |
+| **Total: all ten scripts exited 0** | **369/369** |
+
+Internal-browser verification used only local model/provider fixtures: initial redirect
+and invalid-token rejection, valid login with an HttpOnly cookie, approved connector write
+and accepted implementation/check/review, sign-out with subsequent stream access denied
+401, then another configured user denied access to the first user's stream/approval with
+404. The final fixture restart invalidated previous sessions; signing in again and rerunning
+accepted coding confirmed the corrected mobile layout. Its screenshot was visually reviewed
+and the current-page console had no warnings/errors. Intentional unauthorized probes returned
+401/404; those are expected access-control outcomes, not feature failures.
+
+The existing Playwright/Chrome browser script was updated for mandatory login and its
+now-ambiguous form selectors, with a reply/composer overlap assertion. It was not run in
+this instance; manual in-app browser evidence is separate from the 369 offline checks.
+No dependencies were installed, no live accounts or GPU were used, and main/hosted CI
+counts or statuses were not changed by these local passes.
+
+### Authentication prerequisite and next handoff
+
+1. Copy `app/access.example.json` outside the editable repository. Choose one tenant and
+   its trusted users, remove unused entries and set `origin` to the exact browser-facing
+   scheme/host/port, without a trailing slash. Keep loopback HTTP local; public-facing
+   transport requires separately configured TLS and correctly trusted reverse-proxy headers.
+2. Generate separate random access tokens using `secrets.token_urlsafe(32)` or equivalent,
+   and export them under the configured environment-variable names. Do not reuse model or
+   provider keys, place tokens in the configuration, pass them as task text/URLs, or forward
+   credential environment variables into project checks. Set `AGENT_CHAT_AUTH_CONFIG` to
+   the external file before starting chat using the milestone 3 run order. The local coding
+   CLI continues to use the operator's local workspace/config; it is not a remote client.
+3. Treat users in one process as trusted collaborators on the same repository. Their
+   files, harness globals, checks, model endpoint and provider credential scopes remain
+   shared. HTTP task ownership is not file confidentiality, OS isolation, cross-process
+   workspace locking or protection against hostile project code. Sessions and run events
+   remain in memory; authentication does not make the current server safe for public
+   multi-tenant hosting.
+4. Next implementation milestone: isolated per-tenant execution with separate workspace,
+   configuration and provider credentials, followed by durable tasks/results, cancellation
+   and fair dispatch. Add remote terminal transport and measure the planned four-H200
+   DeepSeek service only after those boundaries exist. No daily user quota was introduced.
+5. Source review/commit/PR and live deployment remain separate authorization steps; the
+   published progress branch alone does not deliver the implementation.
 
 ## Skills cost and license milestone
 
