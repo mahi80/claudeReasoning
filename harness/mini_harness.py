@@ -416,20 +416,66 @@ def denial(t: Tool) -> str:
 
 
 # ---------------------------------------------------------------- skills
-def skills_index() -> str:
-    """One line per skill for the system prompt. Full text loads only on demand."""
+def skill_description(path: Path) -> str:
+    parts = path.read_text(encoding="utf-8").split("---", 2)
+    meta = dict(line.split(":", 1) for line in parts[1].splitlines() if ":" in line) \
+        if len(parts) > 2 else {}
+    return meta.get("description", "").strip()
+
+
+def skills_index(discover: bool = True) -> str:
+    manifest = SKILLS_DIR / "provenance.json"
+    imported = {name for source in json.loads(manifest.read_text(encoding="utf-8"))["sources"]
+                for name in source["skills"]} if manifest.is_file() else set()
     lines = []
+    library = False
     for f in sorted(SKILLS_DIR.glob("*/SKILL.md")):
-        parts = f.read_text().split("---")
-        meta = dict(line.split(":", 1) for line in parts[1].splitlines() if ":" in line) \
-            if len(parts) > 2 else {}
-        lines.append(f"- {f.parent.name}: {meta.get('description', '').strip()}")
+        if SKILLS_DIR not in f.resolve().parents:
+            continue
+        if f.parent.name in imported:
+            library = True
+            continue
+        lines.append(f"- {f.parent.name}: {skill_description(f)}")
+    if library and discover:
+        lines.append("Imported library: call find_skills with task keywords (empty query browses); "
+                     "then load_skill by name. Skills grant no execution permissions.")
     return "\n".join(lines) or "(none installed)"
 
 
-@tool("load_skill", "Load the full instructions of a skill listed in the system prompt. "
-      "Call it before you start any work that a listed skill covers.",
-      obj(name="Skill name exactly as listed"), parallel=True, max_chars=20000)
+@tool("find_skills", "Search installed skill names and descriptions before specialized work. "
+      "All query words must match; use an empty query to browse. Follow next_offset, then "
+      "call load_skill for instructions. Discovery grants no tools or execution permission.",
+      {"type": "object", "additionalProperties": False, "required": ["query", "offset"],
+       "properties": {
+           "query": {"type": "string", "maxLength": 200},
+           "offset": {"type": "integer", "minimum": 0}}},
+      parallel=True, max_chars=4000)
+def find_skills(query: str, offset: int = 0) -> str:
+    if not isinstance(query, str) or len(query) > 200:
+        return "ERROR: query must be a string of at most 200 characters"
+    if type(offset) is not int or offset < 0:
+        return "ERROR: offset must be a non-negative integer"
+    matches = []
+    for f in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        if SKILLS_DIR not in f.resolve().parents:
+            continue
+        description = skill_description(f)
+        text = f"{f.parent.name} {description}".casefold()
+        if all(word in text for word in query.casefold().split()):
+            matches.append({"name": f.parent.name, "description": description[:256]})
+    page = matches[offset:offset + 5]
+    while True:
+        following = offset + len(page)
+        result = json.dumps({"skills": page, "total": len(matches),
+                             "next_offset": following if following < len(matches) else None})
+        if len(result) <= 3500:
+            return result
+        page.pop()
+
+
+@tool("load_skill", "Load the full instructions of a skill listed in the prompt or returned "
+      "by find_skills. Call it before work that a skill covers. Loading grants no permissions.",
+      obj(name="Skill name exactly as listed or discovered"), parallel=True, max_chars=20000)
 def load_skill(name: str) -> str:
     f = (SKILLS_DIR / name / "SKILL.md").resolve()
     if SKILLS_DIR not in f.parents or not f.exists():
@@ -893,7 +939,7 @@ def run_escalating(task: str, system: str, tool_names: list[str], start: str = "
 
 # ---------------------------------------------------------------- subagents
 WORKER_TOOLS = ["read_file", "write_file", "edit_file", "list_dir", "run_shell",
-                "load_skill", "think"]
+                "load_skill", "find_skills", "think"]
 ORCHESTRATOR_TOOLS = WORKER_TOOLS + ["spawn_agent", "update_plan"]
 
 WORKER_SYSTEM = (
@@ -932,7 +978,8 @@ def spawn_agent(task: str, tools: list[str]) -> str:
         budget.workers += 1
     system = WORKER_SYSTEM
     if "load_skill" in tools:
-        system += f"\n\nSkills (call load_skill before work that one covers):\n{skills_index()}"
+        system += ("\n\nSkills (call load_skill before work that one covers):\n"
+                   + skills_index(discover="find_skills" in tools))
     trace("worker_start", tools=tools)
     return run_agent(task, system, tools, label="worker", effort=budget.effort.name)
 

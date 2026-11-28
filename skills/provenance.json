@@ -1,0 +1,149 @@
+{
+  "format": 1,
+  "adaptation_date": "2026-11-28",
+  "base_commit": "1da68b04835585a2fc2417985be96848786d8a38",
+  "scope": "Instruction-only compact adaptations; no upstream scripts, installers, hooks, plugins, datasets or cloud integrations bundled.",
+  "sources": [
+    {
+      "repository": "anthropics/skills",
+      "revision": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+      "license": "Apache-2.0",
+      "license_files": ["licenses/anthropic-APACHE-2.0.txt"],
+      "skills": {
+        "docx": "skills/docx/SKILL.md",
+        "xlsx": "skills/xlsx/SKILL.md",
+        "pdf": "skills/pdf/SKILL.md",
+        "pptx": "skills/pptx/SKILL.md",
+        "frontend-design": "skills/frontend-design/SKILL.md",
+        "webapp-testing": "skills/webapp-testing/SKILL.md",
+        "mcp-builder": "skills/mcp-builder/SKILL.md"
+      }
+    },
+    {
+      "repository": "DietrichGebert/ponytail",
+      "revision": "ebd8654c2c627f721eb8f9c0d1bd4090a29f9e10",
+      "license": "MIT",
+      "license_files": ["licenses/ponytail-MIT.txt"],
+      "skills": {"ponytail": "skills/ponytail/SKILL.md"}
+    },
+    {
+      "repository": "obra/superpowers",
+      "revision": "22f0b463e7a5e579904dd6211a520321035526f7",
+      "license": "MIT",
+      "license_files": ["licenses/superpowers-MIT.txt"],
+      "skills": {
+        "systematic-debugging": "skills/systematic-debugging/SKILL.md",
+        "test-driven-development": "skills/test-driven-development/SKILL.md",
+        "verification-before-completion": "skills/verification-before-completion/SKILL.md"
+      }
+    },
+    {
+      "repository": "mattpocock/skills",
+      "revision": "bbadaa631c37af594e5a05c9cefacd9956136b18",
+      "license": "MIT",
+      "license_files": ["licenses/mattpocock-MIT.txt"],
+      "skills": {"code-review": "skills/engineering/code-review/SKILL.md"}
+    },
+    {
+      "repository": "vercel-labs/agent-skills",
+      "revision": "5a37a6329fbad3666c3207392a6a7c0110e92efb",
+      "license": "MIT",
+      "license_files": ["licenses/vercel-react-MIT.txt"],
+      "skills": {"vercel-react-best-practices": "skills/react-best-practices/SKILL.md"}
+    },
+    {
+      "repository": "vercel-labs/web-interface-guidelines",
+      "revision": "434b7f91364665f2f733b310ec54809bf8f37937",
+      "license": "MIT",
+      "license_files": ["licenses/vercel-guidelines-MIT.txt"],
+      "skills": {"web-design-guidelines": "command.md"},
+      "catalog_repository": "vercel-labs/agent-skills",
+      "catalog_revision": "5a37a6329fbad3666c3207392a6a7c0110e92efb"
+    },
+    {
+      "repository": "affaan-m/ECC",
+      "revision": "4adeee6732a12d1540f49a4d50a38ce8c97f9a53",
+      "license": "MIT",
+      "license_files": ["licenses/ecc-MIT.txt"],
+      "skills": {
+        "api-design": "skills/api-design/SKILL.md",
+        "database-migrations": "skills/database-migrations/SKILL.md",
+        "docker-patterns": "skills/docker-patterns/SKILL.md",
+        "security-review": "skills/security-review/SKILL.md",
+        "python-testing": "skills/python-testing/SKILL.md"
+      }
+    },
+    {
+      "repository": "hashicorp/agent-skills",
+      "revision": "5e30fa5c867ba6777c37e4206babfd08049c396f",
+      "license": "MPL-2.0",
+      "license_files": ["licenses/terraform-MPL-2.0.txt"],
+      "skills": {
+        "terraform-style-guide": "plugins/terraform/skills/terraform-style-guide/SKILL.md",
+        "terraform-test": "plugins/terraform/skills/terraform-test/SKILL.md"
+      }
+    },
+    {
+      "repository": "aws/agent-toolkit-for-aws",
+      "revision": "c51cbfe1a2e2c9f93a40dab35c7082caf3f0f021",
+      "license": "Apache-2.0",
+      "license_files": ["licenses/aws-APACHE-2.0.txt", "licenses/aws-NOTICE.txt"],
+      "skills": {
+        "aws-cdk": "skills/core-skills/aws-cdk/SKILL.md",
+        "aws-containers": "skills/core-skills/aws-containers/SKILL.md",
+        "aws-billing-and-cost-management": "skills/core-skills/aws-billing-and-cost-management/SKILL.md"
+      }
+    },
+    {
+      "repository": "microsoft/azure-skills",
+      "revision": "7847020998043c6231929b364c35393b7cdab270",
+      "license": "MIT",
+      "license_files": ["licenses/azure-MIT.txt"],
+      "skills": {
+        "azure-prepare": "skills/azure-prepare/SKILL.md",
+        "azure-diagnostics": "skills/azure-diagnostics/SKILL.md"
+      }
+    },
+    {
+      "repository": "cloudflare/skills",
+      "revision": "ff191de7d903788eceaf516a514ae7d3b56b924a",
+      "license": "Apache-2.0",
+      "license_files": ["licenses/cloudflare-APACHE-2.0.txt"],
+      "skills": {"workers-best-practices": "skills/workers-best-practices/SKILL.md"}
+    },
+    {
+      "repository": "GoogleCloudPlatform/cloud-run-mcp",
+      "revision": "7fec3954ca060b3491f6262b9e9bc15333d7f15e",
+      "license": "Apache-2.0",
+      "license_files": ["licenses/cloud-run-APACHE-2.0.txt"],
+      "skills": {"cloud-run": "skills/cloud-run/SKILL.md"}
+    },
+    {
+      "repository": "wshobson/agents",
+      "revision": "c96b5f6552dba32e4492307493ee613581430715",
+      "license": "MIT",
+      "license_files": ["licenses/wshobson-MIT.txt"],
+      "skills": {
+        "k8s-manifest-generator": "plugins/kubernetes-operations/skills/k8s-manifest-generator/SKILL.md",
+        "distributed-tracing": "plugins/observability-monitoring/skills/distributed-tracing/SKILL.md"
+      }
+    },
+    {
+      "repository": "sickn33/antigravity-awesome-skills",
+      "revision": "560a2b034d8ce3eb90445841ab6a53df7132926a",
+      "license": "CC-BY-4.0; agent-evaluation retains Apache-2.0 upstream attribution",
+      "license_files": ["licenses/aas-CONTENT.txt", "licenses/aas-MIT.txt", "licenses/CC-BY-4.0.txt", "licenses/anthropic-APACHE-2.0.txt"],
+      "skills": {
+        "agent-evaluation": "skills/agent-evaluation/SKILL.md",
+        "ai-prompt-regression-testing": "skills/ai-prompt-regression-testing/SKILL.md",
+        "agent-evaluation-reporting": "skills/agent-evaluation-reporting/SKILL.md"
+      },
+      "authors": {
+        "agent-evaluation": "Vibeship Spawner Skills; AAS maintainers",
+        "ai-prompt-regression-testing": "Ranjeet2063",
+        "agent-evaluation-reporting": "Whxuan0701"
+      },
+      "previous_changes": {"agent-evaluation": "AAS revision 2026-09-05 removed unsupported benchmark claims and corrected uncertainty/error reporting."}
+    }
+  ]
+}
