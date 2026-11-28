@@ -85,6 +85,28 @@ class EndsWhenClosed:
         self.closed.wait(10)
 
 
+class FailsWhenClosed(EndsWhenClosed):
+    """A model stream that yields its chunks, then fails once closed, the way a socket
+    closed from another thread behaves on Windows."""
+
+    def __iter__(self):
+        yield from self.chunks
+        self.closed.wait(10)
+        raise ConnectionResetError("stream closed")
+
+
+class RaisesOnRead(EndsWhenClosed):
+    """A model stream whose first read fails, as the SDK's own timeout does."""
+
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def __iter__(self):
+        raise self.error
+        yield
+
+
 def chunk(content, finish=None):
     return SimpleNamespace(usage=None, choices=[SimpleNamespace(
         finish_reason=finish, delta=SimpleNamespace(content=content, tool_calls=None))])
@@ -168,12 +190,14 @@ class EvalOutcomeTests(unittest.TestCase):
         graders = [c for c in self.checker.call_args_list if c.args and c.args[0][:2] == [sys.executable, "-I"]]
         self.assertEqual(graders, [])
 
-    def call_with(self, stream):
+    def call_with(self, stream, call_timeout=1.0, run_seconds=None):
         fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: stream)))
         fake.with_options = lambda **kwargs: fake
-        token = self.e.h.BUDGET.set(self.e.h.RunBudget(self.e.h.EFFORTS["medium"]))
+        with patch.object(self.e.h, "RUN_MAX_SECONDS", run_seconds or self.e.h.RUN_MAX_SECONDS):
+            self.budget = self.e.h.RunBudget(self.e.h.EFFORTS["medium"])
+        token = self.e.h.BUDGET.set(self.budget)
         try:
-            with patch.object(self.e.h, "client", fake), patch.object(self.e.h, "CALL_TIMEOUT", 1.0):
+            with patch.object(self.e.h, "client", fake), patch.object(self.e.h, "CALL_TIMEOUT", call_timeout):
                 return self.e.h.call_model([{"role": "user", "content": "fixture"}], [])
         finally:
             self.e.h.BUDGET.reset(token)
@@ -185,6 +209,23 @@ class EvalOutcomeTests(unittest.TestCase):
     def test_complete_reply_survives_a_late_call_timer(self):
         reply = self.call_with(EndsWhenClosed(chunk("done", finish="stop")))
         self.assertEqual(reply.text, "done")
+
+    def test_complete_reply_survives_a_stream_that_fails_once_the_timer_closes_it(self):
+        reply = self.call_with(FailsWhenClosed(chunk("done", finish="stop")))
+        self.assertEqual(reply.text, "done")
+
+    def test_sdk_timeout_error_becomes_the_call_timeout(self):
+        timeout = APITimeoutError(httpx.Request("POST", "http://127.0.0.1:9/v1"))
+        with self.assertRaisesRegex(TimeoutError, r"exceeded its 1-second limit \(APITimeoutError\)") as caught:
+            self.call_with(RaisesOnRead(timeout))
+        self.assertIsInstance(caught.exception.__cause__, APITimeoutError)
+        self.assertFalse(self.budget.stopped)
+
+    def test_timeout_of_a_call_limited_by_the_run_deadline_stops_the_run(self):
+        timeout = APITimeoutError(httpx.Request("POST", "http://127.0.0.1:9/v1"))
+        with self.assertRaises(self.e.h.BudgetExceeded):
+            self.call_with(RaisesOnRead(timeout), call_timeout=600.0, run_seconds=300.0)
+        self.assertEqual(self.budget.stopped, "time budget")
 
     def test_stream_that_keeps_sending_past_the_limit_is_ended_by_the_timer(self):
         TricklingModel.release.clear()
@@ -205,10 +246,19 @@ class EvalOutcomeTests(unittest.TestCase):
             self.e.h.BUDGET.reset(token)
 
     def test_call_timeout_must_be_a_positive_number(self):
-        for value in (0.0, -1.0, float("nan"), float("inf")):
+        for value in (0.0, -1.0, float("nan"), float("inf"), 1e300):
             with self.subTest(value=value), patch.object(self.e.h, "CALL_TIMEOUT", value):
                 with self.assertRaisesRegex(ValueError, "LLM_CALL_TIMEOUT must be a positive number"):
                     self.e.h.RunBudget(self.e.h.EFFORTS["medium"])
+
+    def test_an_invalid_call_timeout_stops_the_harness_at_startup(self):
+        for value in ("0", "nan", "1e300"):
+            with self.subTest(value=value):
+                done = self.real_run([sys.executable, "-c", "import mini_harness"], cwd=ROOT / "harness",
+                                     env={**os.environ, "LLM_CALL_TIMEOUT": value},
+                                     capture_output=True, text=True, timeout=120)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("LLM_CALL_TIMEOUT must be a positive number of seconds", done.stderr)
 
     def test_another_runs_records_cannot_change_the_outcome(self):
         def busy(*args, **kwargs):
@@ -244,7 +294,11 @@ class EvalOutcomeTests(unittest.TestCase):
     def test_non_time_limits_remain_failures(self):
         for reason in ("1-step limit", "token budget", "model cost budget", "independent-review limit"):
             with self.subTest(reason=reason):
-                self.agent.return_value = f"Stopped at the {reason} before finishing."
+                def stop(*args, reason=reason, **kwargs):
+                    if reason.endswith("budget"):          # the runtime records budget stops in the trace
+                        self.e.h.trace("budget_limit", reason=reason, agent="main")
+                    return f"Stopped at the {reason} before finishing."
+                self.agent.side_effect = stop
                 self.assertEqual(self.run_case()["outcome"], "fail")
         self.checker.assert_not_called()
 

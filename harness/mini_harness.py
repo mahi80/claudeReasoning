@@ -23,8 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
-import httpx
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 # ---------------------------------------------------------------- configuration
 BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
@@ -53,6 +52,13 @@ RUN_MAX_COST = float(os.environ.get("AGENT_MAX_COST_USD", "0"))
 INPUT_PRICE = float(os.environ.get("LLM_INPUT_USD_PER_MILLION", "0"))
 OUTPUT_PRICE = float(os.environ.get("LLM_OUTPUT_USD_PER_MILLION", "0"))
 
+
+def check_call_timeout(seconds: float) -> None:
+    if not (math.isfinite(seconds) and 0 < seconds <= 86400):    # longer overflows socket waits
+        raise ValueError("LLM_CALL_TIMEOUT must be a positive number of seconds, at most 86400")
+
+
+check_call_timeout(CALL_TIMEOUT)                  # at startup, before a pod is started or billed
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=CALL_TIMEOUT)
 RUN_ID = contextvars.ContextVar("run_id", default="-")   # set by the caller per request
 LISTENERS: list[Callable[[dict], None]] = []             # e.g. a UI showing live progress
@@ -117,8 +123,7 @@ class RunBudget:
             raise ValueError("Execution limits and token prices must be finite and non-negative")
         if RUN_MAX_COST and not (INPUT_PRICE > 0 and OUTPUT_PRICE > 0):
             raise ValueError("A model cost limit requires positive input and output token prices")
-        if not (math.isfinite(CALL_TIMEOUT) and CALL_TIMEOUT > 0):
-            raise ValueError("LLM_CALL_TIMEOUT must be a positive number of seconds")
+        check_call_timeout(CALL_TIMEOUT)
         self.effort = effort
         self.deadline = time.monotonic() + RUN_MAX_SECONDS if RUN_MAX_SECONDS else None
         self.max_tokens, self.max_cost = RUN_MAX_TOKENS, RUN_MAX_COST
@@ -487,8 +492,10 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
     reservation = budget.reserve(prompt_size(messages, tools) + 4096, max_tokens) if budget else None
     if reservation:
         kwargs["max_tokens"] = reservation[1]
+    request_timeout = CALL_TIMEOUT
     try:
-        sending = client.with_options(timeout=time_left(CALL_TIMEOUT), max_retries=0) if budget else client
+        request_timeout = time_left(CALL_TIMEOUT)      # shorter when the run's deadline is nearer
+        sending = client.with_options(timeout=request_timeout, max_retries=0) if budget else client
         with sending.chat.completions.create(**kwargs) as stream:
             def expire() -> None:
                 expired.set()
@@ -519,6 +526,11 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
                         if tc.function:
                             slot["name"] += tc.function.name or ""
                             slot["arguments"] += tc.function.arguments or ""
+            except Exception as stream_error:
+                # The timer closed the stream after the reply was complete, with only the
+                # usage chunk to come: keep the reply.
+                if isinstance(stream_error, BudgetExceeded) or not (expired.is_set() and finished):
+                    raise
             finally:
                 if timer:
                     timer.cancel()
@@ -530,11 +542,18 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
         if budget:
             budget.settle(reservation, None)
         time_left(CALL_TIMEOUT)               # the shared deadline, if it passed, wins
+        timed_out = expired.is_set() or isinstance(err, (TimeoutError, APITimeoutError))
+        if budget and timed_out and request_timeout < CALL_TIMEOUT:
+            # The run's remaining time was this call's limit, so the run's time budget ended
+            # it, even when the timer or the SDK's timeout fired a moment before the deadline.
+            with budget.lock:
+                budget.stopped = budget.stopped or "time budget"
+            raise BudgetExceeded(budget.stopped) from err
         if isinstance(err, TimeoutError):
             raise
-        if expired.is_set() or isinstance(err, httpx.TimeoutException):
-            # Headers arrive at once when streaming, so a slow or stalled call ends here,
-            # as a read error on the closed stream, rather than as the SDK's timeout error.
+        if timed_out:
+            # Headers arrive at once when streaming, so a slow or stalled call ends here: as a
+            # read error on the stream the timer closed, or as the SDK's own timeout error.
             raise TimeoutError(f"model call exceeded its {CALL_TIMEOUT:.0f}-second limit "
                                f"({type(err).__name__})") from err
         raise
