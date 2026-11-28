@@ -452,3 +452,9 @@ Tested with Python 3.13, openai 3.60.0, mcp 2.3.0, fastapi 0.165.0, uvicorn 0.54
 `app/static/` holds unmodified copies of htmx 2.0.10 and its SSE extension 2.2.4, both
 under the Zero-Clause BSD licence; see
 [`app/static/THIRD_PARTY.md`](app/static/THIRD_PARTY.md).
+
+## License
+
+Apache License 2.0; see [`LICENSE`](LICENSE). Third-party notices are in
+[`NOTICE`](NOTICE) and, for the vendored htmx files, in
+[`app/static/THIRD_PARTY.md`](app/static/THIRD_PARTY.md).

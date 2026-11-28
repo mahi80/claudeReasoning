@@ -1,0 +1,10 @@
+claudeReasoning
+Copyright 2026 Mahendra Bhandari
+
+Licensed under the Apache License, Version 2.0; see the LICENSE file.
+
+This product bundles third-party files:
+
+- htmx 2.0.10 (app/static/htmx.min.js) and htmx-ext-sse 2.2.4 (app/static/sse.min.js),
+  unmodified copies from https://htmx.org, under the Zero-Clause BSD licence (0BSD).
+  Details and integrity digests: app/static/THIRD_PARTY.md.
