@@ -291,8 +291,8 @@ pre-approved the argv, and the commit is local, on a feature branch, with hooks,
 and user configuration disabled and `.agent/` and check reports left out. Before every
 git command the harness scans the configuration git would read and refuses any file
 setting that could redirect a push or run a program (URL rewrites, proxies, hooks,
-filters, includes). `git_push_pr` is the only tool that asks for approval; it refuses a
-rewritten URL, the token reaches git only through
+filters, includes, remotes named by a URL, push URLs). `git_push_pr` is the only tool
+that asks for approval; it refuses a rewritten URL, the token reaches git only through
 [`harness/git_credential.py`](harness/git_credential.py), which answers for the
 configured host over https alone, and the pull request is opened through the GitHub
 API. Run the push as its own command (`--push-only`) so the token is never in the
