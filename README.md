@@ -15,6 +15,119 @@ design document that explains every part.
 > production-readiness evidence; see [`infra/runpod.md`](infra/runpod.md) for the
 > tested configuration, safety checks and remaining deployment-specific limits.
 
+## Progress and handoff — 28 November 2026
+
+This is a dated coordination snapshot, not a claim that every tested change is on
+`main`. The goal is a task executor with planning, scoped workers, lazily loaded skills,
+approved MCP/tools, verification and code-gated delivery; proprietary-model parity is
+not measured.
+
+### Available on GitHub
+
+| Location | Completed work | Status |
+|---|---|---|
+| `main` at `440c409` | PR #1: runtime/approval safety, scoped delegation, configured MCP and shared budgets | Merged |
+| `main` at `440c409` | PR #2: five-stage delivery runner, guarded checks/commits/push and ADR gates | Merged |
+| `main` at `440c409` | PR #3: Apache 2.0 project license | Merged |
+| `main` at `440c409` | PR #4: 19th `make-tests-pass` eval, `--delivery` checks without git tools, isolated Python graders, pipeline/quality stage tests | Merged |
+| `skills-import` at `18af506` | 33 compact instruction-only imports: document, coding, cloud and agent-regression guidance; eight originals preserved, 41 skills total | Published branch, not merged into `main` |
+| `readme-progress` | This README handoff only | Documentation branch; runtime fixes below are not included |
+
+The imported skills carry pinned provenance and license notices. Loader/provenance
+checks passed; no third-party executables, hooks, assets or dependencies were installed.
+Office generation, rendering and spreadsheet recalculation have not been validated.
+
+### Completed locally, not published
+
+The local `runtime-reliability` branch is based on merged `main` at `440c409`, with the
+skills import and these uncommitted changes applied:
+
+- **Pod lifecycle:** fail promptly on rejected starts, request idle shutdown even when
+  `/health` is down, recheck activity under the lock, deduplicate accepted stops, restart
+  after a stop request, retain restart state through rejected/failed starts, and keep
+  the watchdog alive through transport failures. API
+  acceptance is not proof of physical GPU shutdown; these checks used mocks only.
+- **Reviewer evidence:** immutable, read-only review snapshots with bounded index/record
+  paging. Coordinator reasoning and extra permissions are not exposed; results clipped
+  at the original tool boundary remain incomplete.
+- **Checkpoint journals:** format 2 snapshots reference an append-only observation
+  journal by record count and SHA-256. Resume verifies the committed prefix, preserves
+  genuine repeated calls without duplicating evidence, and leaves crash tails untouched.
+  Journals and in-memory evidence still grow; there is no retention cap or hard snapshot
+  size limit. Older checkpoint formats require a fresh task run.
+- **Eval outcome ledger:** runner-assigned `pass`, `fail`, `invalid`, `timeout` and
+  operator-declared `assisted`. Only unassisted passes count in `pass_rate`, over all
+  attempts; assistance does not hide failure or timeout. Empty shards report no pass
+  rate, and failed/stopped executions cannot pass an artifact-only grader.
+- **Trace integrity:** serialize JSONL appends across threads in one process, preventing
+  parallel workers from losing/interleaving records on Windows. Parallel processes
+  still need separate trace paths. The queued-approval deadline test now simulates
+  expiry deterministically; runtime approval behavior was not changed.
+
+These runtime changes are **not fetchable from GitHub yet**. Do not assume a remote
+`runtime-reliability` branch exists or that the documentation branch implements them.
+The local integration applied cleanly and preserved both bots' mock-model scenarios;
+there was no manual conflict resolution. Preserve both sets if a later integration
+conflicts in the shared mock endpoint. Runtime commit, push and merge are still pending.
+
+### Verification and next work
+
+The merged-main baseline passed 288 non-browser checks on 28 November. The local
+combined snapshot passed **374/374 offline checks** across ten scripts on Windows with
+Python 3.14.3. This count is for the uncommitted integration, not `main` or this README
+branch. Check counts include script assertions as well as unittest methods, not
+benchmark tasks.
+
+| Script in the local integration | Passing checks/tests |
+|---|---:|
+| `test_harness.py` | 131 |
+| `test_evals.py` | 10 |
+| `test_eval_cases.py` | 51 |
+| `test_app.py` | 34 |
+| `test_delivery.py` | 70 |
+| `test_skills.py` | 9 |
+| `test_pod_manager.py` | 17 |
+| `test_review_evidence.py` | 13 |
+| `test_checkpoints.py` | 17 |
+| `test_eval_outcomes.py` | 22 |
+| **Total** | **374** |
+
+The first full run exposed a parallel trace-write failure; the next exposed the
+clock-sensitive queued-approval test. Both were addressed, and all ten scripts then
+exited successfully in the final run. The separate restart regression reproduced
+rejected and transport-failed starts before its fix.
+
+To reproduce after the runtime patch is shared, activate an environment containing
+`requirements.txt` dependencies, then run from that integration's repository root
+(**not** the documentation-only branch):
+
+```bash
+for suite in harness evals eval_cases app delivery skills pod_manager \
+             review_evidence checkpoints eval_outcomes; do
+  NO_PROXY=localhost,.localhost,127.0.0.1,::1 \
+    no_proxy=localhost,.localhost,127.0.0.1,::1 \
+    python "tests/test_${suite}.py" || exit "$?"
+done
+```
+
+These tests use local mock endpoints or fixtures; they do not start a paid GPU.
+
+No new live-model/GPU run or browser rerun was performed for these local changes. The
+27 November B300 evidence above predates them and the delivery runner; it does not
+validate the new delivery stages or the full 19-case benchmark.
+
+Remaining work, in order:
+
+1. Review and publish the local runtime patch on a separate branch, then integrate the
+   published skills with explicit approval; do not overwrite either bot's worktree.
+2. Add a CI driver for the offline suites; keep browser prerequisites/skips explicit.
+3. Rerun browser coverage and connect delivery-stage execution/results to the chat UI.
+4. Separately authorize a bounded live-model delivery/eval validation and confirm actual
+   pod shutdown, preserving failures and assisted results as well as successes.
+5. Enforce host/container isolation and deployment budgets. Current workspace checks and
+   approvals are not an OS sandbox; model-token budgets do not cap GPU rental spending.
+6. Rebuild and review the design document after the implementation settles.
+
 ## What is in here
 
 | Path | What it holds |
@@ -122,9 +235,10 @@ example. Add `--delivery evals/delivery.evals.json` to give the agent the `run_c
 tool with a `tests` check, which the last case, `make-tests-pass`, is written for: it
 measures whether the model can make a failing test suite pass when it can run the tests
 itself, the skill the delivery stages depend on. `--shard 0/2` and `--shard 1/2` split cases over two processes; use different
-workspace, trace and checkpoint paths for each process. Each run's workspace is retained
-under its output folder for inspection. Failed or stopped runs always fail grading,
-even if their files satisfy an artifact-only check.
+workspace, trace and checkpoint paths for each process. This runner reuses the workspace
+for each case, so only the last case's workspace remains; retain the report and trace for
+previous attempts. Failed or stopped runs always fail grading, even if their files
+satisfy an artifact-only check.
 
 None of this adds reasoning ability the model does not have. It helps a model use what
 it has: fewer slips, fewer early exits, a second look. If high effort still fails your
