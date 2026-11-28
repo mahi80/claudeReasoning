@@ -14,11 +14,15 @@ git tools in the config are not offered, since a case workspace is wiped per cas
 whose program is "python" runs with this interpreter; any other program must be on PATH.
 The config and its home folder must lie outside the eval workspace, and each check's argv
 must make sense in a fresh case workspace.
+Each case runs under its own run id (eval-<case>-<effort>), so records another process
+writes to the same trace file cannot change its outcome. The report keeps only the type
+of a run or grader failure; the full reason goes to stderr.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -30,12 +34,22 @@ from openai import APITimeoutError
 import mini_harness as h
 
 
+def diagnose(case: dict, stage: str, err: BaseException) -> None:
+    """The full reason on stderr for the operator; the report keeps only the exception type."""
+    print(f"run_evals: {case.get('id', '?')}: {stage} failed: {type(err).__name__}: {str(err)[:300]}",
+          file=sys.stderr, flush=True)
+
+
 def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None,
              assisted: bool = False) -> dict:
     assert "eval" in h.WORKSPACE.name, "point AGENT_WORKSPACE at a dedicated eval folder"
     offset = h.TRACE_FILE.stat().st_size if h.TRACE_FILE.exists() else 0
     started = time.time()
     outcome, passed = "fail", False
+    # Its own run id tags every event of this case, so another process sharing the trace
+    # file cannot change the outcome; the checkpoint key is the same id, overwritten by repeats.
+    run_id = "eval-" + re.sub(r"[^A-Za-z0-9_.-]", "_", f"{case.get('id', 'case')}-{effort}")[:80]
+    token = h.RUN_ID.set(run_id)
     try:
         shutil.rmtree(h.WORKSPACE, ignore_errors=True)
         h.WORKSPACE.mkdir(parents=True)
@@ -45,8 +59,12 @@ def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None,
         answer = h.run_agent(case["task"], h.orchestrator_system(), granted, effort=effort)
     except (TimeoutError, APITimeoutError) as err:
         outcome, answer = "timeout", f"RUN FAILED: {type(err).__name__}"
+        diagnose(case, "run", err)
     except Exception as err:
         outcome, answer = "invalid", f"RUN FAILED: {type(err).__name__}"
+        diagnose(case, "run", err)
+    finally:
+        h.RUN_ID.reset(token)
     seconds = round(time.time() - started, 1)
     events, why = [], answer[:200]
     if h.TRACE_FILE.exists():
@@ -54,6 +72,9 @@ def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None,
             with h.TRACE_FILE.open(encoding="utf-8") as stream:
                 stream.seek(offset)
                 events = [json.loads(line) for line in stream]
+            # Records of another run are skipped; anything malformed still fails closed below.
+            events = [e for e in events if not (isinstance(e, dict) and isinstance(e.get("run"), str)
+                                                and e["run"] != run_id)]
             for event in events:
                 if not isinstance(event, dict) or not isinstance(event.get("event"), str):
                     raise ValueError("invalid trace event")
@@ -91,6 +112,7 @@ def run_case(case: dict, effort: str = "medium", tools: list[str] | None = None,
                 outcome, why = "timeout", "the check timed out"
             except Exception as err:
                 outcome, why = "invalid", f"CHECK FAILED: {type(err).__name__}"
+                diagnose(case, "grader", err)
     if passed and assisted:
         outcome = "assisted"
     tools = [e for e in events if e["event"] == "tool"]

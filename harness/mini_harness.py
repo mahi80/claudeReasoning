@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
+import httpx
 from openai import OpenAI
 
 # ---------------------------------------------------------------- configuration
@@ -46,12 +47,13 @@ MAX_TOOL_CHARS = 6000   # tool output handed back to the model
 KEEP_RECENT = 8         # messages kept word for word when compacting
 MCP_CONFIG = os.environ.get("AGENT_MCP_CONFIG", "")
 RUN_MAX_SECONDS = float(os.environ.get("AGENT_MAX_SECONDS", "900"))
+CALL_TIMEOUT = float(os.environ.get("LLM_CALL_TIMEOUT", "600"))   # seconds for one model call
 RUN_MAX_TOKENS = int(os.environ.get("AGENT_MAX_TOTAL_TOKENS", "100000"))
 RUN_MAX_COST = float(os.environ.get("AGENT_MAX_COST_USD", "0"))
 INPUT_PRICE = float(os.environ.get("LLM_INPUT_USD_PER_MILLION", "0"))
 OUTPUT_PRICE = float(os.environ.get("LLM_OUTPUT_USD_PER_MILLION", "0"))
 
-client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=600)
+client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=CALL_TIMEOUT)
 RUN_ID = contextvars.ContextVar("run_id", default="-")   # set by the caller per request
 LISTENERS: list[Callable[[dict], None]] = []             # e.g. a UI showing live progress
 TRACE_LOCK = threading.Lock()
@@ -477,20 +479,24 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
     if tools:
         kwargs.update(tools=[t.schema() for t in tools], tool_choice="auto")
     reply, text, thought, calls = Reply("", []), [], [], {}
+    expired = threading.Event()                        # set when this call's own limit ends it
     budget = BUDGET.get()
     reservation = budget.reserve(prompt_size(messages, tools) + 4096, max_tokens) if budget else None
     if reservation:
         kwargs["max_tokens"] = reservation[1]
     try:
-        sending = client.with_options(timeout=time_left(600), max_retries=0) if budget else client
+        sending = client.with_options(timeout=time_left(CALL_TIMEOUT), max_retries=0) if budget else client
         with sending.chat.completions.create(**kwargs) as stream:
-            timer = threading.Timer(time_left(600), stream.close) if budget else None
+            def expire() -> None:
+                expired.set()
+                stream.close()
+            timer = threading.Timer(time_left(CALL_TIMEOUT), expire) if budget else None
             if timer:
                 timer.daemon = True
                 timer.start()
             try:
                 for chunk in stream:
-                    time_left(600)
+                    time_left(CALL_TIMEOUT)
                     if chunk.usage:
                         reply.usage_complete = (chunk.usage.prompt_tokens is not None
                                                 and chunk.usage.completion_tokens is not None)
@@ -512,14 +518,19 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
             finally:
                 if timer:
                     timer.cancel()
-    except Exception:
+    except Exception as err:
         if budget:
             budget.settle(reservation, None)
-        time_left(600)
+        time_left(CALL_TIMEOUT)               # the shared deadline, if it passed, wins
+        if expired.is_set() or isinstance(err, httpx.TimeoutException):
+            # Headers arrive at once when streaming, so a slow or stalled call ends here,
+            # as a read error on the closed stream, rather than as the SDK's timeout error.
+            raise TimeoutError(f"model call exceeded its {CALL_TIMEOUT:.0f}-second limit "
+                               f"({type(err).__name__})") from err
         raise
     if budget:
         budget.settle(reservation, reply)
-    time_left(600)
+    time_left(CALL_TIMEOUT)
     reply.calls = [calls[i] for i in sorted(calls)]
     for c in reply.calls:
         c["id"] = c["id"] or uuid.uuid4().hex[:9]

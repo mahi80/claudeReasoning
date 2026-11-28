@@ -6,18 +6,39 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-from openai import APITimeoutError
+from openai import APITimeoutError, OpenAI
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "harness"))
+
+
+class StallingModel(BaseHTTPRequestHandler):
+    """A model server that sends its headers and one chunk, then nothing until released."""
+    release = threading.Event()
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        chunk = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                 "choices": [{"index": 0, "delta": {"content": "thinking"}, "finish_reason": None}]}
+        self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+        self.wfile.flush()
+        self.release.wait(10)
 
 
 class EvalOutcomeTests(unittest.TestCase):
@@ -26,6 +47,7 @@ class EvalOutcomeTests(unittest.TestCase):
         with patch.dict(os.environ, {"LLM_API_KEY": "EMPTY", "LLM_BASE_URL": "http://127.0.0.1:9/v1"}):
             cls.e = importlib.import_module("run_evals")
         cls.addClassCleanup(cls.e.h.client.close)
+        cls.real_run_agent = staticmethod(cls.e.h.run_agent)    # not bound to the test case
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eval-outcomes-")
@@ -76,6 +98,44 @@ class EvalOutcomeTests(unittest.TestCase):
         self.agent.side_effect = APITimeoutError(httpx.Request("POST", "http://127.0.0.1:9/v1"))
         self.assertEqual(self.run_case()["outcome"], "timeout")
         self.checker.assert_not_called()
+
+    def test_stalled_model_stream_is_timeout_not_invalid(self):
+        StallingModel.release.clear()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StallingModel)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(StallingModel.release.set)
+        stalled = OpenAI(base_url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="EMPTY")
+        self.addCleanup(stalled.close)
+        with patch.object(self.e.h, "client", stalled), patch.object(self.e.h, "CALL_TIMEOUT", 1.0),                 patch.object(self.e.h, "run_agent", self.real_run_agent), redirect_stderr(StringIO()) as err:
+            row = self.run_case()
+        self.assertEqual(row["outcome"], "timeout")
+        self.assertEqual(row["why"], "RUN FAILED: TimeoutError")
+        self.assertIn("exceeded its 1-second limit", err.getvalue())
+        self.checker.assert_not_called()
+
+    def test_another_runs_records_cannot_change_the_outcome(self):
+        def busy(*args, **kwargs):
+            token = self.e.h.RUN_ID.set("chat-ui-run")         # another run writing the same trace
+            try:
+                self.e.h.trace("budget_limit", reason="time budget", agent="main")
+            finally:
+                self.e.h.RUN_ID.reset(token)
+            self.e.h.trace("model", agent="main", step=1, output_tokens=3, reasoning_chars=0)
+            return "completed"
+        self.agent.side_effect = busy
+        row = self.run_case()
+        self.assertEqual(row["outcome"], "pass")
+        self.assertEqual((row["steps"], row["output_tokens"]), (1, 3))
+
+    def test_failure_details_go_to_stderr_and_not_into_the_report(self):
+        self.agent.side_effect = RuntimeError("context window exceeded by 512 tokens")
+        with redirect_stderr(StringIO()) as err:
+            row = self.run_case()
+        self.assertEqual(row["why"], "RUN FAILED: RuntimeError")
+        self.assertIn("fixture: run failed: RuntimeError: context window exceeded by 512 tokens", err.getvalue())
 
     def test_shared_deadline_timeout_comes_from_runtime_trace(self):
         def stop(*args, **kwargs):
