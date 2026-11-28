@@ -21,10 +21,19 @@ HEALTH_URL = (os.environ.get("LLM_HEALTH_URL")
 START_TIMEOUT = float(os.environ.get("POD_START_TIMEOUT", "1500"))   # seconds
 IDLE_SECONDS = float(os.environ.get("POD_IDLE_SECONDS", "900"))      # stop after this
 POLL_SECONDS = float(os.environ.get("POD_POLL_SECONDS", "10"))
+# After an accepted stop the pod may answer /health for a while on its way down, so for
+# this long a healthy reply is not taken as proof that it is running again.
+STOP_SETTLE_SECONDS = float(os.environ.get("POD_STOP_SETTLE_SECONDS", "300"))
 
 _lock = threading.Lock()
 _last_used = time.time()
 _stop_requested = False
+_stop_requested_at = 0.0
+
+
+def _settling() -> bool:
+    """True shortly after an accepted stop, while /health cannot tell running from stopping."""
+    return _stop_requested and time.time() - _stop_requested_at < STOP_SETTLE_SECONDS
 
 
 def healthy() -> bool:
@@ -61,6 +70,10 @@ def ensure_ready(notify: Callable[[str], None] = lambda text: None) -> None:
         return
     with _lock:                       # concurrent requests share one start
         touch()
+        if _stop_requested and not _settling() and healthy():
+            # Up long after our stop: a start whose reply was lost, or one from elsewhere.
+            _stop_requested = False
+            return
         restart = _stop_requested
         if not restart and healthy():
             return
@@ -85,17 +98,19 @@ def ensure_ready(notify: Callable[[str], None] = lambda text: None) -> None:
 
 def stop_if_idle(active_runs: Callable[[], int]) -> bool:
     """Request shutdown after IDLE_SECONDS of inactivity. Return True if accepted."""
-    global _stop_requested
+    global _stop_requested, _stop_requested_at
     if not POD_ID or active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
         return False
     with _lock:
-        if _stop_requested or active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
+        if active_runs() > 0 or time.time() - _last_used < IDLE_SECONDS:
             return False
+        if _stop_requested and (_settling() or not healthy()):
+            return False              # still stopping, or stopped as requested
         status, _ = _action("stop")
         if not 200 <= status < 300:
             logging.getLogger(__name__).warning("Runpod rejected idle pod shutdown (HTTP %s).", status)
             return False
-        _stop_requested = True
+        _stop_requested, _stop_requested_at = True, time.time()
         return True
 
 
@@ -105,7 +120,7 @@ def start_watchdog(active_runs: Callable[[], int], every: float = 60) -> threadi
             time.sleep(every)
             try:
                 stop_if_idle(active_runs)
-            except (urllib.error.URLError, OSError) as error:
+            except Exception as error:    # one failed attempt must not end idle shutdown for good
                 logging.getLogger(__name__).warning(
                     "Runpod idle shutdown failed; retrying at the next interval (%s).",
                     type(error).__name__)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import threading
 import unittest
@@ -16,7 +17,8 @@ spec.loader.exec_module(pm)
 class PodLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.multiple(pm, POD_ID="fixture", IDLE_SECONDS=10, START_TIMEOUT=2,
-                                        POLL_SECONDS=1, _last_used=0, _stop_requested=False))
+                                        POLL_SECONDS=1, STOP_SETTLE_SECONDS=300, _last_used=0,
+                                        _stop_requested=False, _stop_requested_at=0.0))
         self.clock = self.enterContext(patch.object(pm.time, "time", return_value=100))
         self.sleep = self.enterContext(patch.object(pm.time, "sleep"))
         self.health = self.enterContext(patch.object(pm, "healthy", return_value=False))
@@ -130,6 +132,39 @@ class PodLifecycleTests(unittest.TestCase):
                 self.assertEqual([call.args for call in self.action.call_args_list],
                                  [("stop",), ("start",), ("start",)])
 
+    def test_unconfirmed_restart_does_not_disable_idle_stop(self):
+        # The idle stop is accepted; the next start's reply is lost after Runpod started the pod.
+        self.action.side_effect = [(202, "{}"), urllib.error.URLError("reply lost"), (202, "{}")]
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        with self.assertRaises(urllib.error.URLError):
+            pm.ensure_ready()
+        self.assertTrue(pm._stop_requested)
+        self.health.return_value = True                # the pod is up after all
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + pm.IDLE_SECONDS
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.assertEqual([call.args for call in self.action.call_args_list],
+                         [("stop",), ("start",), ("stop",)])
+
+    def test_stop_is_not_repeated_while_the_pod_is_settling_or_down(self):
+        self.health.return_value = True                # a stopping pod may still answer
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS - 1
+        self.assertFalse(pm.stop_if_idle(lambda: 0))
+        self.health.assert_not_called()
+        self.health.return_value = False               # settled and down, as requested
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + 1
+        self.assertFalse(pm.stop_if_idle(lambda: 0))
+        self.health.assert_called_once_with()
+        self.action.assert_called_once_with("stop")
+
+    def test_pod_running_long_after_a_stop_is_reused_without_a_start(self):
+        self.assertTrue(pm.stop_if_idle(lambda: 0))
+        self.health.return_value = True                # started from the console, say
+        self.clock.return_value = 100 + pm.STOP_SETTLE_SECONDS + 1
+        pm.ensure_ready()
+        self.assertFalse(pm._stop_requested)
+        self.action.assert_called_once_with("stop")
+
     def test_failed_stop_can_be_retried(self):
         self.action.side_effect = [(503, "private response body"), (200, "{}")]
         with self.assertLogs(pm.__name__, "WARNING") as logs:
@@ -148,7 +183,9 @@ class PodLifecycleTests(unittest.TestCase):
         self.assertEqual(self.action.call_count, 2)
 
     def test_watchdog_survives_transport_failures(self):
-        for error in (urllib.error.URLError("private fixture URL"), OSError("private fixture path")):
+        for error in (urllib.error.URLError("private fixture URL"), OSError("private fixture path"),
+                      http.client.IncompleteRead(b"private fixture body"),
+                      RuntimeError("private fixture: dictionary changed size during iteration")):
             with self.subTest(error=type(error).__name__):
                 self.sleep.side_effect = [None, None, SystemExit]
                 with patch.object(pm, "stop_if_idle", side_effect=[error, False]) as stop:
@@ -164,7 +201,20 @@ class PodLifecycleTests(unittest.TestCase):
     def test_concurrent_requests_share_one_start(self):
         ready = False
         barrier, failures = threading.Barrier(3), []
-        self.health.side_effect = lambda: ready
+        second_caller, calls, count = threading.Event(), [], threading.Lock()
+
+        def health():
+            seen = ready                               # what this caller would act on
+            with count:
+                calls.append(seen)
+                first = len(calls) == 1
+            if first:
+                second_caller.wait(0.5)                # without the lock a second caller gets here now
+            else:
+                second_caller.set()
+            return seen
+
+        self.health.side_effect = health
 
         def start(action):
             nonlocal ready

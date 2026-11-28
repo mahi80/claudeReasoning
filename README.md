@@ -386,6 +386,7 @@ that GPU, so it cannot decide its own start.
 | `RUNPOD_POD_ID`, `RUNPOD_API_KEY` | unset | Set both to let the pod manager start and stop the pod |
 | `LLM_HEALTH_URL` | the pod's proxy `/health` | Readiness check |
 | `POD_IDLE_SECONDS` | `900` | Stop the pod after this much quiet |
+| `POD_STOP_SETTLE_SECONDS` | `300` | After an accepted stop, how long a healthy reply is not taken as proof the pod is running again |
 | `POD_START_TIMEOUT` | `1500` | Give up on a start after this many seconds |
 | `APPROVAL_TIMEOUT` | `300` | An unanswered approval counts as a refusal |
 
