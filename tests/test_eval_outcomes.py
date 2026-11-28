@@ -13,6 +13,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -39,6 +40,32 @@ class StallingModel(BaseHTTPRequestHandler):
         self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
         self.wfile.flush()
         self.release.wait(10)
+
+
+class EndsWhenClosed:
+    """A model stream that yields its chunks, then ends without an error once closed,
+    the way a socket closed from another thread can behave on Linux."""
+
+    def __init__(self, *chunks):
+        self.chunks, self.closed = chunks, threading.Event()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        self.closed.set()
+
+    def __iter__(self):
+        yield from self.chunks
+        self.closed.wait(10)
+
+
+def chunk(content, finish=None):
+    return SimpleNamespace(usage=None, choices=[SimpleNamespace(
+        finish_reason=finish, delta=SimpleNamespace(content=content, tool_calls=None))])
 
 
 class EvalOutcomeTests(unittest.TestCase):
@@ -114,7 +141,28 @@ class EvalOutcomeTests(unittest.TestCase):
         self.assertEqual(row["outcome"], "timeout")
         self.assertEqual(row["why"], "RUN FAILED: TimeoutError")
         self.assertIn("exceeded its 1-second limit", err.getvalue())
-        self.checker.assert_not_called()
+        # Only the grader counts: on Linux the SDK's platform probe runs `uname -p` through the
+        # same patched subprocess.run.
+        graders = [c for c in self.checker.call_args_list if c.args and c.args[0][:2] == [sys.executable, "-I"]]
+        self.assertEqual(graders, [])
+
+    def call_with(self, stream):
+        fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: stream)))
+        fake.with_options = lambda **kwargs: fake
+        token = self.e.h.BUDGET.set(self.e.h.RunBudget(self.e.h.EFFORTS["medium"]))
+        try:
+            with patch.object(self.e.h, "client", fake), patch.object(self.e.h, "CALL_TIMEOUT", 1.0):
+                return self.e.h.call_model([{"role": "user", "content": "fixture"}], [])
+        finally:
+            self.e.h.BUDGET.reset(token)
+
+    def test_reply_cut_off_by_the_call_timer_is_a_timeout_even_without_an_error(self):
+        with self.assertRaisesRegex(TimeoutError, "exceeded its 1-second limit"):
+            self.call_with(EndsWhenClosed(chunk("partial")))
+
+    def test_complete_reply_survives_a_late_call_timer(self):
+        reply = self.call_with(EndsWhenClosed(chunk("done", finish="stop")))
+        self.assertEqual(reply.text, "done")
 
     def test_another_runs_records_cannot_change_the_outcome(self):
         def busy(*args, **kwargs):

@@ -480,6 +480,7 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
         kwargs.update(tools=[t.schema() for t in tools], tool_choice="auto")
     reply, text, thought, calls = Reply("", []), [], [], {}
     expired = threading.Event()                        # set when this call's own limit ends it
+    finished = False                                   # the server marked the reply complete
     budget = BUDGET.get()
     reservation = budget.reserve(prompt_size(messages, tools) + 4096, max_tokens) if budget else None
     if reservation:
@@ -504,6 +505,7 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
                         reply.output_tokens = chunk.usage.completion_tokens or 0
                     if not chunk.choices:
                         continue
+                    finished = finished or bool(chunk.choices[0].finish_reason)
                     delta = chunk.choices[0].delta
                     if delta.content:
                         text.append(delta.content)
@@ -518,10 +520,16 @@ def call_model(messages: list[dict], tools: list[Tool], max_tokens: int = 4096,
             finally:
                 if timer:
                     timer.cancel()
+            if expired.is_set() and not finished:
+                # On Linux the closed stream can end without an error; a reply cut off
+                # part-way must not pass for a complete one.
+                raise TimeoutError(f"model call exceeded its {CALL_TIMEOUT:.0f}-second limit")
     except Exception as err:
         if budget:
             budget.settle(reservation, None)
         time_left(CALL_TIMEOUT)               # the shared deadline, if it passed, wins
+        if isinstance(err, TimeoutError):
+            raise
         if expired.is_set() or isinstance(err, httpx.TimeoutException):
             # Headers arrive at once when streaming, so a slow or stalled call ends here,
             # as a read error on the closed stream, rather than as the SDK's timeout error.
