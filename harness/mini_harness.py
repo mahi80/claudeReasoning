@@ -117,6 +117,8 @@ class RunBudget:
             raise ValueError("Execution limits and token prices must be finite and non-negative")
         if RUN_MAX_COST and not (INPUT_PRICE > 0 and OUTPUT_PRICE > 0):
             raise ValueError("A model cost limit requires positive input and output token prices")
+        if not (math.isfinite(CALL_TIMEOUT) and CALL_TIMEOUT > 0):
+            raise ValueError("LLM_CALL_TIMEOUT must be a positive number of seconds")
         self.effort = effort
         self.deadline = time.monotonic() + RUN_MAX_SECONDS if RUN_MAX_SECONDS else None
         self.max_tokens, self.max_cost = RUN_MAX_TOKENS, RUN_MAX_COST

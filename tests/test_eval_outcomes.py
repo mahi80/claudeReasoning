@@ -42,6 +42,28 @@ class StallingModel(BaseHTTPRequestHandler):
         self.release.wait(10)
 
 
+class TricklingModel(BaseHTTPRequestHandler):
+    """A model server that keeps sending a chunk every 0.2 s, so only the call timer ends it."""
+    release = threading.Event()
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        chunk = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                 "choices": [{"index": 0, "delta": {"content": "."}, "finish_reason": None}]}
+        try:
+            while not self.release.wait(0.2):
+                self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                self.wfile.flush()
+        except OSError:
+            pass
+
+
 class EndsWhenClosed:
     """A model stream that yields its chunks, then ends without an error once closed,
     the way a socket closed from another thread can behave on Linux."""
@@ -163,6 +185,30 @@ class EvalOutcomeTests(unittest.TestCase):
     def test_complete_reply_survives_a_late_call_timer(self):
         reply = self.call_with(EndsWhenClosed(chunk("done", finish="stop")))
         self.assertEqual(reply.text, "done")
+
+    def test_stream_that_keeps_sending_past_the_limit_is_ended_by_the_timer(self):
+        TricklingModel.release.clear()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), TricklingModel)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(TricklingModel.release.set)
+        busy = OpenAI(base_url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="EMPTY")
+        self.addCleanup(busy.close)
+        token = self.e.h.BUDGET.set(self.e.h.RunBudget(self.e.h.EFFORTS["medium"]))
+        try:
+            with patch.object(self.e.h, "client", busy), patch.object(self.e.h, "CALL_TIMEOUT", 1.0):
+                with self.assertRaisesRegex(TimeoutError, "exceeded its 1-second limit"):
+                    self.e.h.call_model([{"role": "user", "content": "fixture"}], [])
+        finally:
+            self.e.h.BUDGET.reset(token)
+
+    def test_call_timeout_must_be_a_positive_number(self):
+        for value in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(value=value), patch.object(self.e.h, "CALL_TIMEOUT", value):
+                with self.assertRaisesRegex(ValueError, "LLM_CALL_TIMEOUT must be a positive number"):
+                    self.e.h.RunBudget(self.e.h.EFFORTS["medium"])
 
     def test_another_runs_records_cannot_change_the_outcome(self):
         def busy(*args, **kwargs):
